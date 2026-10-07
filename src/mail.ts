@@ -49,6 +49,21 @@ async function tokenKey(env: Env): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
+/** Encrypts text with the app's key (AES-GCM). Used for tokens and saved escalation details. */
+export async function encryptText(env: Env, text: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await tokenKey(env), enc.encode(text)));
+  return `${b64(iv)}.${b64(sealed)}`;
+}
+
+export async function decryptText(env: Env, value: string | null | undefined): Promise<string | null> {
+  if (!value) return null;
+  try {
+    const [iv, data] = value.split(".");
+    return dec.decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(iv) }, await tokenKey(env), unb64(data)));
+  } catch { return null; }
+}
+
 export async function storeRefreshToken(env: Env, email: string, refreshToken: string): Promise<void> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await tokenKey(env), enc.encode(refreshToken)));

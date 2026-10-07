@@ -8,7 +8,7 @@ import { draftAndRoute, logEvent, postReply, runAgent } from "./agent";
 import { clearSamples, loadSamples } from "./samples";
 import { availableReplies, learnGuidelines, MIN_REPLIES } from "./learn";
 import { clearGuidelinesCache, currentGuidelines } from "./guidelines";
-import { CONCERN_LABEL, FIELDS_FOR, TEAMS_FOR, buildEmail, getTeams, parseEscalation, resolveEscalation, saveTeams, sendEscalation, type Team } from "./escalate";
+import { CONCERN_LABEL, FIELDS_FOR, TEAMS_FOR, buildEmail, lastEscalation, getTeams, parseEscalation, resolveEscalation, saveTeams, sendEscalation, type Team } from "./escalate";
 import { allowedDomains, canSendAs, checkAddresses, mailConfigured, MailError } from "./mail";
 
 const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external')";
@@ -77,6 +77,7 @@ async function listReviews(env: Env, user: User, url: URL) {
     : "create_time DESC";
   const rows = (await env.DB.prepare(`SELECT * FROM reviews WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT 51 OFFSET ?`)
     .bind(...args, page * 50).all<ReviewRow>()).results;
+  for (const row of rows) delete (row as any).escalation_details;
   return json({ reviews: rows.slice(0, 50), more: rows.length > 50, page });
 }
 
@@ -95,8 +96,10 @@ async function reviewDetail(env: Env, user: User, id: string) {
       ready: true, mailReady: mailConfigured(env), canSend: await canSendAs(env, user.email), domains: allowedDomains(env),
       teams: canAct(user, r.rooftop_key) ? await getTeams(env, r.rooftop_key) : null,
       teamsFor: TEAMS_FOR, fieldsFor: FIELDS_FOR, labels: CONCERN_LABEL, sent,
+      last: canAct(user, r.rooftop_key) ? await lastEscalation(env, r) : null,
     };
   } catch { /* migration 0003 not run yet */ }
+  delete (r as any).escalation_details;
   return json({ review: r, events, escalation });
 }
 

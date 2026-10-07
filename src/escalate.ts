@@ -1,19 +1,19 @@
 import type { Env, ReviewRow, User } from "./types";
 import { nowIso } from "./types";
 import { rooftopByKey } from "./rooftops";
-import { checkAddresses, sendAs } from "./mail";
+import { checkAddresses, decryptText, encryptText, sendAs } from "./mail";
 import { logEvent } from "./agent";
 
 // Escalations email a store team about a review, sent from the escalating
-// person's own mailbox. Customer details typed into
-// the form go into the email only; the database keeps who, when, to whom, and
-// the concern type, so customer information isn't stored in the dashboard.
+// person's own mailbox. The last escalation's concern, customer details, note
+// and recipients are kept with the review (encrypted) so follow-ups start
+// pre-filled. Approved by Matt Costanzo per company PII policy.
 
 export type Concern = "sales" | "service" | "both" | "other";
 export type Team = "sales" | "service" | "store";
 
 export const CONCERN_LABEL: Record<Concern, string> = {
-  sales: "Sales concern", service: "Service concern", both: "Sales and service concern", other: "Other concern",
+  sales: "Sales Concern", service: "Service Concern", both: "Sales & Service Concern", other: "Other Concern",
 };
 
 const FIELD_LABEL: Record<string, string> = {
@@ -93,41 +93,60 @@ export function buildEmail(r: ReviewRow, input: EscalationInput, sender: User, o
   const firstAt = r.escalation_first_at || sentAt;
   const who = sender.name ? `${sender.name} (${sender.email})` : sender.email;
   const stars = r.stars ? "\u2605".repeat(r.stars) + "\u2606".repeat(5 - r.stars) : "No rating";
-  const subject = `${r.is_sample ? "[TEST, sample review] " : ""}Review escalation: ${store} | ${r.stars ? r.stars + "-star" : "Unrated"} Google review${followups ? ` | Follow-up #${followups}` : ""}`;
+  const subject = `${r.is_sample ? "[TEST, sample review] " : ""}${CONCERN_LABEL[input.concern]}: ${store} | ${r.stars ? r.stars + "-star" : "Unrated"} Google review${followups ? ` | Follow-up #${followups}` : ""}`;
+
+  // Outlook ignores inherited fonts and falls back to Times New Roman, so every element sets its own.
+  const F = "font-family:Arial,Helvetica,sans-serif;";
+  const T = `${F}font-size:16px;line-height:24px;color:#1f2933;`;
+  const STAR = "font-family:'Segoe UI Symbol','Apple Symbols',Arial,sans-serif;";
+  const starIcons = (size: number) => r.stars
+    ? `<span style="${STAR}font-size:${size}px;line-height:1;letter-spacing:2px;color:#e39b12">${"\u2605".repeat(r.stars)}</span><span style="${STAR}font-size:${size}px;line-height:1;letter-spacing:2px;color:#c9d1d9">${"\u2605".repeat(5 - r.stars)}</span>`
+    : "";
+  const starText = r.stars ? `${r.stars} out of 5 stars` : "No star rating";
 
   const row = (label: string, value: string, strong = false) =>
-    `<tr><td style="padding:6px 12px 6px 0;color:#5b6875;white-space:nowrap;vertical-align:top">${esc(label)}</td><td style="padding:6px 0;${strong ? "font-weight:600;" : ""}">${value}</td></tr>`;
+    `<tr><td style="${F}font-size:15px;line-height:22px;padding:6px 16px 6px 0;color:#5b6875;white-space:nowrap;vertical-align:top">${esc(label)}</td><td style="${T}padding:6px 0;${strong ? "font-weight:bold;" : ""}">${value}</td></tr>`;
+  const heading = (text: string) => `<p style="${F}font-size:17px;line-height:24px;font-weight:bold;color:#1f2933;margin:0 0 8px">${text}</p>`;
 
   const customerRows = Object.entries(input.fields)
     .map(([k, v]) => row(FIELD_LABEL[k], esc(k.endsWith("Date") ? plainDate(v) : v), k === "client"))
     .join("");
 
-  const html = `<!doctype html><html><body style="margin:0;background:#f3f5f8;font-family:Segoe UI,Arial,sans-serif;color:#17212b">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f5f8;padding:24px 12px"><tr><td align="center">
-<table role="presentation" width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#ffffff;border:1px solid #dbe1e8;border-radius:8px;overflow:hidden">
-<tr><td style="background:#0772bc;color:#ffffff;padding:16px 24px">
-  <div style="font-size:13px;opacity:.9">${esc(store)}</div>
-  <div style="font-size:20px;font-weight:700">${esc(CONCERN_LABEL[input.concern])}${followups ? ` <span style="font-weight:400">(follow-up #${followups})</span>` : ""}</div>
+  const html = `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;padding:0;background:#f3f5f8;${F}">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f5f8"><tr><td align="center" style="padding:24px 12px;${F}">
+<table role="presentation" width="640" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#ffffff;border:1px solid #dbe1e8">
+<tr><td style="background:#0772bc;padding:18px 24px;${F}">
+  <div style="${F}font-size:15px;line-height:20px;color:#ffffff">${esc(store)}</div>
+  <div style="${F}font-size:22px;line-height:30px;font-weight:bold;color:#ffffff">${esc(CONCERN_LABEL[input.concern])}${followups ? ` (follow-up #${followups})` : ""}</div>
 </td></tr>
-<tr><td style="padding:20px 24px">
-  ${customerRows ? `<p style="margin:0 0 6px;font-weight:600">We believe the customer that left the review is:</p>
-  <table role="presentation" cellpadding="0" cellspacing="0" style="font-size:15px;margin-bottom:18px">${customerRows}</table>` : ""}
-  ${input.note ? `<p style="margin:0 0 6px;font-weight:600">Note from ${esc(sender.name || sender.email)}:</p>
-  <div style="font-size:15px;line-height:1.5;white-space:pre-wrap;margin-bottom:18px">${esc(input.note)}</div>` : ""}
-  <p style="margin:0 0 6px;font-weight:600">The review</p>
-  <div style="color:#e39b12;font-size:20px;letter-spacing:2px">${stars}</div>
-  <div style="background:#f3f5f8;border-left:4px solid #e39b12;padding:12px 14px;margin:8px 0 18px;font-size:15px;line-height:1.5;white-space:pre-wrap">${r.text ? esc(r.text) : "<em>Rating only, no written review</em>"}</div>
-  <table role="presentation" cellpadding="0" cellspacing="0" style="font-size:14px;border-top:1px solid #dbe1e8;padding-top:8px;width:100%">
+<tr><td style="padding:20px 24px 4px;${F}">
+  <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+    <td style="padding:0 12px 0 0;vertical-align:middle">${starIcons(28)}</td>
+    <td style="${F}font-size:17px;line-height:24px;font-weight:bold;color:#1f2933;vertical-align:middle">${starText}</td>
+  </tr></table>
+</td></tr>
+<tr><td style="padding:16px 24px 24px;${F}">
+  ${customerRows ? `${heading("We believe the customer that left the review is:")}
+  <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 22px">${customerRows}</table>` : ""}
+  ${input.note ? `${heading(`Note from ${esc(sender.name || sender.email)}:`)}
+  <div style="${T}white-space:pre-wrap;margin:0 0 22px">${esc(input.note)}</div>` : ""}
+  ${heading("The review")}
+  <div style="${T}background:#f3f5f8;border-left:4px solid #e39b12;padding:12px 16px;margin:0 0 22px;white-space:pre-wrap">${r.text ? esc(r.text) : "<em>Rating only, no written review</em>"}</div>
+  <table role="presentation" cellpadding="0" cellspacing="0" style="border-top:1px solid #dbe1e8;width:100%">
+    <tr><td colspan="2" style="height:8px;font-size:0;line-height:0">&nbsp;</td></tr>
+    ${row("Star rating", r.stars ? `${starIcons(18)} <span style="${T}">(${r.stars} of 5)</span>` : "None")}
     ${row("Review received", esc(et(r.create_time)))}
     ${row("First sent to the team", esc(et(firstAt)) + (followups ? "" : " (this email)"))}
     ${row("Follow-ups without resolution", String(followups), followups > 0)}
     ${row("Communication #", `${commNumber} for this review`)}
     ${row("Sent by", esc(who))}
   </table>
-  <p style="margin:22px 0 4px"><a href="${esc(origin)}/?review=${encodeURIComponent(r.id)}" style="background:#0772bc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:6px;font-weight:600;display:inline-block">Open the review</a></p>
-  <p style="font-size:13px;color:#5b6875;margin:14px 0 0">Reply to this email to reach ${esc(sender.name || sender.email)}.</p>
+  <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 8px"><tr><td style="background:#0772bc;border-radius:6px">
+    <a href="${esc(origin)}/?review=${encodeURIComponent(r.id)}" style="${F}font-size:16px;line-height:20px;font-weight:bold;color:#ffffff;text-decoration:none;padding:12px 20px;display:inline-block">Open the review</a>
+  </td></tr></table>
+  <p style="${F}font-size:14px;line-height:20px;color:#5b6875;margin:12px 0 0">Reply to this email to reach ${esc(sender.name || sender.email)}.</p>
 </td></tr></table>
-<p style="font-size:12px;color:#5b6875;margin:12px 0 0">Sent from Lester Glenn Reviews</p>
+<p style="${F}font-size:13px;line-height:18px;color:#5b6875;margin:12px 0 0">Sent from Lester Glenn Reviews</p>
 </td></tr></table></body></html>`;
   return { subject, html };
 }
@@ -137,11 +156,12 @@ export async function sendEscalation(env: Env, r: ReviewRow, input: EscalationIn
   const email = buildEmail(r, input, user, origin, sentAt);
   await sendAs(env, user.email, { to: input.recipients, subject: email.subject, html: email.html });
   const followups = r.escalation_open ?? 0;
+  const details = await encryptText(env, JSON.stringify({ concern: input.concern, fields: input.fields, note: input.note, recipients: input.recipients }));
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO escalations (review_id, concern, recipients, included_customer, followup_number, sent_by, sent_at) VALUES (?,?,?,?,?,?,?)`)
       .bind(r.id, input.concern, input.recipients.join(","), Object.keys(input.fields).length ? 1 : 0, followups, user.email, sentAt),
     env.DB.prepare(`UPDATE reviews SET escalation_count = escalation_count + 1, escalation_open = escalation_open + 1,
-      escalation_first_at = COALESCE(escalation_first_at, ?), escalation_last_at = ? WHERE id = ?`).bind(sentAt, sentAt, r.id),
+      escalation_first_at = COALESCE(escalation_first_at, ?), escalation_last_at = ?, escalation_details = ? WHERE id = ?`).bind(sentAt, sentAt, details, r.id),
   ]);
   await logEvent(env, r.id, user.email, "escalated",
     `${CONCERN_LABEL[input.concern]} sent to ${input.recipients.length} ${input.recipients.length === 1 ? "person" : "people"}${followups ? `, follow-up #${followups}` : ""}`);
@@ -150,4 +170,11 @@ export async function sendEscalation(env: Env, r: ReviewRow, input: EscalationIn
 export async function resolveEscalation(env: Env, r: ReviewRow, user: User) {
   await env.DB.prepare("UPDATE reviews SET escalation_open = 0, escalation_resolved_at = ? WHERE id = ?").bind(nowIso(), r.id).run();
   await logEvent(env, r.id, user.email, "escalation_resolved");
+}
+
+/** The last escalation's details for pre-filling a follow-up, or null. */
+export async function lastEscalation(env: Env, r: ReviewRow): Promise<{ concern: Concern; fields: Record<string, string>; note: string; recipients: string[] } | null> {
+  const raw = await decryptText(env, (r as any).escalation_details);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
 }
