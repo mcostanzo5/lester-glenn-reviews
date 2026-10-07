@@ -135,9 +135,12 @@ adjust who it goes to, preview the email, and send.
 - Each review shows how many emails have been sent about it, when the last one
   went out, and how many follow-ups have gone out without resolution. **Mark
   resolved** resets the follow-up count; the total keeps counting.
-- Customer details typed into the form go in the email only. The dashboard
-  stores who sent it, when, to whom, and the concern type, but not the customer
-  details or the note.
+- The last escalation's concern, customer details, note, and recipients are
+  saved with the review, encrypted, so a follow-up starts filled in (the previous
+  note is shown for reference and the new note starts blank). Only people who can
+  act on that store see them. Storing customer details was approved by Matt
+  Costanzo per company PII policy. Renewing the Microsoft client secret makes
+  previously saved details unreadable, so those follow-ups start blank once.
 
 **How sending works.** At sign-in, Microsoft asks each person once to let the app
 send email as them (or IT approves it for everyone). The app gets a token that
@@ -147,7 +150,7 @@ out. If a token stops working, the dashboard asks them to sign out and back in.
 **One-time setup**
 1. Run the SQL in `migrations/0003_escalations.sql` in the D1 console. Run it
    once only (a second run gives harmless "duplicate column" errors). Then run
-   `migrations/0004_user_tokens.sql`.
+   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`.
 2. IT adds two **delegated** Microsoft Graph permissions to the Lester Glenn
    Reviews app registration, **Mail.Send** and **offline_access**, and clicks
    **Grant admin consent**. Delegated Mail.Send only allows sending as the person
