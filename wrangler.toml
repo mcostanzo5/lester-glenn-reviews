@@ -27,8 +27,8 @@ crons = ["0 0,1,12,13,16,17,20,21 * * *"]
 # dry_run: sample data only | shadow: reads Google, never posts | live: posts replies
 AGENT_MODE = "dry_run"
 # Microsoft 365 sign-in, from the Entra app registration (see README)
-MS_TENANT_ID = ""
-MS_CLIENT_ID = ""
+MS_TENANT_ID = "cebd3ada-40a6-4d78-b4ca-02472b1b7d7b"
+MS_CLIENT_ID = "ffed32c7-e735-4e6f-9ab9-97b89a2c5e32"
 # Always admins, even before anyone is added in Settings
 ADMIN_EMAILS = "mcostanzo@lesterglenn.com"
 MAX_AGE_DAYS = "14"
