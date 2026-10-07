@@ -14,7 +14,8 @@ same review.
 |---|---|
 | `src/agent.ts` | Scheduled run: sync reviews from Google, draft with Claude, route, post |
 | `src/router.ts` | Rules for what can auto-post, including the keyword list that always goes to a manager |
-| `src/guidelines.ts` | Voice and rules Claude follows. Add your best real replies as examples here |
+| `src/guidelines.ts` | Built-in starter guidelines, plus the safety rules that always apply |
+| `src/learn.ts` | Writes new guidelines from your team's real replies (Settings > Reply guidelines) |
 | `src/rooftops.ts` | Store names, sign-offs, contacts, and phone numbers (blank phone = no phone in replies) |
 | `src/api.ts` | Dashboard API and statistics |
 | `src/msauth.ts` | Microsoft 365 sign-in: sends people to Microsoft and verifies who they are |
@@ -101,6 +102,19 @@ Check the stores a person should see, or leave them all unchecked for every
 store. Anyone in `ADMIN_EMAILS` in `wrangler.toml` is always an admin. Anyone in
 your Microsoft tenant can reach the sign-in page, but only people added here (or
 listed in `ADMIN_EMAILS`) can see anything after signing in.
+
+## Reply guidelines
+
+Claude follows the guidelines shown in **Settings > Reply guidelines**. To match
+how your team actually writes, click **Learn from our Google replies** (available
+once at least 20 replies written by your team have synced) or **Paste replies
+instead**. Claude reads them and writes a new set of guidelines into the editor.
+Nothing is saved until you review it and click **Save guidelines**. The agent's
+own replies are never used for learning, and the privacy and safety rules are
+always added on top of whatever is saved.
+
+One-time setup: run the SQL in `migrations/0002_settings.sql` in the D1 console
+before using this panel.
 
 ## Going live
 
