@@ -43,7 +43,10 @@ export async function draftReply(env: Env, stars: number, text: string, rooftop:
         messages: [{ role: "user", content: JSON.stringify(payload) }],
       }),
     });
-    if (!res.ok) return failed(`Claude API error ${res.status}`);
+       if (!res.ok) {
+         const err: any = await res.json().catch(() => ({}));
+         return failed(`Claude API error ${res.status}: ${String(err?.error?.message || "no details").slice(0, 200)}`);
+       }
     const data: any = await res.json();
     const raw = (data.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
     const body = raw.replace(/^```(?:json)?|```$/gm, "").trim();
