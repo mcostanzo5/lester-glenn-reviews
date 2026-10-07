@@ -11,7 +11,7 @@ run_worker_first = ["/api/*"]
 [[d1_databases]]
 binding = "DB"
 database_name = "lester-glenn-reviews"
-database_id = "REPLACE_WITH_DATABASE_ID"
+database_id = "ee207814-a254-4b70-9098-a9835b36efd9"
 migrations_dir = "migrations"
 
 # Cloudflare schedules in UTC, which doesn't change for daylight saving. The
