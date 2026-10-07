@@ -417,7 +417,8 @@ async function renderSettings() {
   const v = $("#view");
   v.innerHTML = `<div class="empty-state">Loading settings\u2026</div>`;
   let users, runs;
-  try { [users, runs] = await Promise.all([api("/api/admin/users"), api("/api/admin/runs")]); }
+  let guide;
+  try { [users, runs, guide] = await Promise.all([api("/api/admin/users"), api("/api/admin/runs"), api("/api/admin/guidelines")]); }
   catch (e) { v.innerHTML = `<div class="empty-state"><strong>Settings didn't load</strong>${esc(e.message)}</div>`; return; }
   const m = state.me.mode;
   const modeText = {
@@ -457,12 +458,35 @@ async function renderSettings() {
       </form>
       <p class="note" style="margin-top:12px">They sign in with their Lester Glenn Microsoft account.</p></div>
   </div>
+  <div class="panel" id="guidePanel"><h3>Reply guidelines</h3>
+    <p class="note">${guide.custom ? `Custom guidelines saved by ${esc(guide.updatedBy || "an admin")}${guide.updatedAt ? ", " + ago(guide.updatedAt) : ""}.` : "Using the built-in starter guidelines."}
+      Claude follows these for every draft. Privacy and safety rules are always added on top, so they can't be edited away.</p>
+    ${guide.needsSetup ? `<p class="late">One-time setup needed: run the SQL in <code>migrations/0002_settings.sql</code> in the D1 console, then reload this page.</p>` : `
+    <div class="actions" style="margin:0 0 12px">
+      <button class="btn primary" id="learnGoogle" ${guide.available < guide.minReplies ? "disabled" : ""}>Learn from our Google replies (${guide.available} on file)</button>
+      <button class="btn" id="showPaste">Paste replies instead</button>
+    </div>
+    ${guide.available < guide.minReplies ? `<p class="note">Learning from Google needs at least ${guide.minReplies} replies your team wrote. They'll be on file once the agent syncs real reviews in shadow or live mode. Until then, paste replies.</p>` : ""}
+    <div id="pasteBox" hidden>
+      <label class="field">Paste past replies (copy them from Google Business Profile, one after another; including the review text helps)
+        <textarea id="pasteText" rows="8" style="width:100%;border:1px solid var(--line);border-radius:6px;padding:10px;font-weight:400"></textarea></label>
+      <button class="btn primary" id="learnPaste">Write guidelines from these</button>
+    </div>
+    <label class="field" for="guideText" style="margin-top:12px">Guidelines (edit freely, then save)</label>
+    <textarea id="guideText" rows="22" style="width:100%;border:1px solid var(--line);border-radius:6px;padding:10px 12px;line-height:1.5;background:var(--panel)">${esc(guide.text)}</textarea>
+    <div class="actions">
+      <button class="btn primary" id="saveGuide">Save guidelines</button>
+      ${guide.custom ? `<button class="btn quiet danger" id="resetGuide">Go back to built-in guidelines</button>` : ""}
+    </div>
+    <p class="meta" id="guideStatus"></p>`}
+  </div>
   <div class="panel"><h3>People with access</h3><div class="table-wrap"><table><thead><tr><th>Email</th><th>Role</th><th>Stores</th><th></th></tr></thead>
     <tbody id="userRows">${userRows}</tbody></table></div></div>
   <div class="panel"><h3>Recent agent runs</h3>${runRows ? `<div class="table-wrap"><table><thead><tr><th>When</th><th>Trigger</th><th class="num">Synced</th>
     <th class="num">Drafted</th><th class="num">Flagged</th><th class="num">Posted</th><th class="num">Errors</th></tr></thead><tbody>${runRows}</tbody></table></div>` : `<p class="note">No runs yet.</p>`}</div>
   ${locRows ? `<div class="panel"><h3>Google locations</h3><div class="table-wrap"><table><thead><tr><th>Google listing</th><th>Matched store</th><th>History import</th><th>Last synced</th></tr></thead><tbody>${locRows}</tbody></table></div></div>` : ""}`;
 
+  if (!guide.needsSetup) bindGuidelines();
   $("#runNow").onclick = async (e) => {
     const b = e.target; b.disabled = true; b.textContent = "Running\u2026";
     try {
@@ -496,6 +520,40 @@ async function renderSettings() {
       await api(`/api/admin/users?email=${encodeURIComponent(b.dataset.remove)}`, { method: "DELETE" });
       toast("Access removed"); renderSettings();
     } catch (err) { toast(err.message, true); }
+  };
+}
+
+function bindGuidelines() {
+  const status = $("#guideStatus");
+  const learn = async (source, btn) => {
+    const old = btn.textContent;
+    btn.disabled = true; btn.textContent = "Reading replies\u2026 (about a minute)";
+    status.textContent = "";
+    try {
+      const r = await api("/api/admin/guidelines/learn", { method: "POST", body: { source, text: source === "pasted" ? $("#pasteText").value : "" } });
+      $("#guideText").value = r.draft;
+      status.textContent = (r.used ? `Written from ${r.used} of your team's replies. ` : "Written from your pasted replies. ") +
+        "Nothing is saved yet: read it over, edit anything, then click Save guidelines.";
+      $("#guideText").focus();
+      $("#guideText").scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (err) { toast(err.message, true); }
+    btn.disabled = false; btn.textContent = old;
+  };
+  if ($("#learnGoogle")) $("#learnGoogle").onclick = (e) => learn("google", e.target);
+  $("#showPaste").onclick = () => { $("#pasteBox").hidden = !$("#pasteBox").hidden; if (!$("#pasteBox").hidden) $("#pasteText").focus(); };
+  $("#learnPaste").onclick = (e) => learn("pasted", e.target);
+  $("#saveGuide").onclick = async (e) => {
+    e.target.disabled = true;
+    try {
+      await api("/api/admin/guidelines", { method: "POST", body: { action: "save", text: $("#guideText").value } });
+      toast("Guidelines saved. New drafts will follow them.");
+      renderSettings();
+    } catch (err) { toast(err.message, true); e.target.disabled = false; }
+  };
+  if ($("#resetGuide")) $("#resetGuide").onclick = async () => {
+    if (!confirm("Go back to the built-in guidelines? Your custom version is kept as a backup in the database.")) return;
+    try { await api("/api/admin/guidelines", { method: "POST", body: { action: "reset" } }); toast("Back to built-in guidelines"); renderSettings(); }
+    catch (err) { toast(err.message, true); }
   };
 }
 
