@@ -111,6 +111,8 @@ async function boot() {
 
 function renderRail() {
   const m = state.me;
+  $("#escTab").hidden = m.escalations === null || m.escalations === undefined;
+  $("#escCount").textContent = m.escalations ? String(m.escalations) : "";
   const total = m.rooftops.reduce((a, r) => a + r.open, 0);
   const btn = (key, name, town, n) => `<button data-key="${esc(key)}" aria-current="${state.rooftop === key}">
       <span class="name">${esc(name)}${town ? `<span class="town">${esc(town)}</span>` : ""}</span>
@@ -193,7 +195,9 @@ function bindFilters() {
 function renderList(more) {
   const v = $("#view");
   if (!state.rows.length) {
-    const msg = state.view === "inbox"
+    const msg = state.view === "escalations"
+      ? `<strong>No open escalations</strong>Reviews that have been emailed to a store team show up here until someone marks them resolved.`
+      : state.view === "inbox"
       ? `<strong>Inbox is clear</strong>New reviews that need a manager will show up here.${state.me.mode === "dry_run" && state.me.role === "admin" ? " Load sample data from Settings to try it out." : ""}`
       : `<strong>No reviews match</strong>Try a different filter or store.`;
     v.innerHTML = filtersHtml() + `<div class="empty-state">${msg}</div>`;
@@ -203,7 +207,14 @@ function renderList(more) {
   v.innerHTML = filtersHtml() + `<div class="list">${state.rows.map(rowHtml).join("")}</div>` +
     (more ? `<button class="btn more" id="more">Show more</button>` : "");
   bindFilters();
-  v.querySelector(".list").onclick = (e) => { const b = e.target.closest(".row"); if (b) openDetail(b.dataset.id); };
+  v.querySelector(".list").onclick = (e) => {
+    const done = e.target.closest("[data-resolve]");
+    if (done) return resolveFromList(done.dataset.resolve, done);
+    const q = e.target.closest("[data-esc]");
+    if (q) return openDetail(q.dataset.esc, true);
+    const b = e.target.closest(".row");
+    if (b) openDetail(b.dataset.id);
+  };
   if (more) $("#more").onclick = () => { state.page++; loadList(true); };
   // Keep focus in the search box while typing
   const q = $("#fQ");
@@ -212,16 +223,25 @@ function renderList(more) {
 
 function rowHtml(r) {
   const text = r.text ? esc(r.text) : "Rating only, no written review";
-  return `<button class="row" data-id="${esc(r.id)}" aria-current="${state.selected === r.id}">
+  const escView = state.view === "escalations";
+  const resolveBtn = escView && state.me.role !== "viewer"
+    ? `<button class="esc-resolve" data-resolve="${esc(r.id)}" title="The team responded: remove from Escalations">Resolved</button>` : "";
+  const quick = state.me.role !== "viewer"
+    ? `<button class="esc-quick" data-esc="${esc(r.id)}" aria-label="Escalate this review" title="${r.escalation_open ? "Follow up with the team" : "Escalate"}">!</button>` : "";
+  const followups = (r.escalation_open || 0) - 1;
+  const when = escView
+    ? `<span class="when-line">First sent ${ago(r.escalation_first_at)}</span><span class="when-line">${r.escalation_count} ${r.escalation_count === 1 ? "email" : "emails"}, last ${ago(r.escalation_last_at)}</span>${followups > 0 ? `<span class="when-line late">${followups} follow-up${followups === 1 ? "" : "s"}, no response</span>` : ""}`
+    : `${ago(r.create_time)}<br>${pill(r.status, r.is_sample)}${r.escalation_count ? ` <span class="pill esc" title="Emails sent to the team about this review">\u2709 ${r.escalation_count}</span>` : ""}`;
+  return `<div class="row-wrap${quick ? " has-quick" : ""}${resolveBtn ? " has-resolve" : ""}"><button class="row" data-id="${esc(r.id)}" aria-current="${state.selected === r.id}">
     <div class="stars-col">${stars(r.stars)}</div>
     <div><div class="store">${esc(shortName(r.rooftop_key))}</div><div class="excerpt${r.text ? "" : " empty"}">${text}</div></div>
-    <div class="when">${ago(r.create_time)}<br>${pill(r.status, r.is_sample)}${r.escalation_count ? ` <span class="pill esc" title="Emails sent to the team about this review">\u2709 ${r.escalation_count}</span>` : ""}</div>
-  </button>`;
+    <div class="when">${when}</div>
+  </button>${resolveBtn}${quick}</div>`;
 }
 
 /* ---------- Detail ---------- */
 
-async function openDetail(id) {
+async function openDetail(id, escalate = false) {
   state.selected = id;
   document.querySelectorAll(".row").forEach((b) => b.setAttribute("aria-current", String(b.dataset.id === id)));
   const d = $("#detail");
@@ -229,7 +249,12 @@ async function openDetail(id) {
   document.querySelector(".shell").classList.add("with-detail");
   d.innerHTML = `<p class="meta">Loading\u2026</p>`;
   try {
-    renderDetail(await api(`/api/reviews/${encodeURIComponent(id)}`));
+    const data = await api(`/api/reviews/${encodeURIComponent(id)}`);
+    renderDetail(data);
+    if (escalate) {
+      if (data.escalation && data.escalation.ready && data.escalation.teams) renderEscalate(data);
+      else toast("Escalation isn't set up yet. See Settings.", true);
+    }
   } catch (e) {
     d.innerHTML = `<button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button><p>${esc(e.message)}</p>`;
   }
@@ -281,7 +306,10 @@ function renderDetail(data) {
   $("#detail").innerHTML = `
     <div class="detail-head">
       <div><h2>${esc(storeName(r.rooftop_key))}</h2><p class="meta">${new Date(r.create_time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</p></div>
-      <button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button>
+      <div class="head-actions">
+        ${canAct && escalation && escalation.ready && escalation.teams ? `<button class="btn escalate" id="escalateBtn">${r.escalation_open ? "Follow up" : "Escalate"}</button>` : ""}
+        <button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button>
+      </div>
     </div>
     <div>${stars(r.stars, "big-stars")}</div>
     <div>${pill(r.status, r.is_sample)}</div>
@@ -324,6 +352,7 @@ async function act(id, action, btn) {
     const i = state.rows.findIndex((x) => x.id === id);
     if (i >= 0) state.rows[i] = r;
     if (state.view === "inbox") state.rows = state.rows.filter((x) => ["new", "pending", "error"].includes(x.status));
+    if (state.view === "escalations") state.rows = state.rows.filter((x) => (x.escalation_open || 0) > 0);
     renderList(false);
     refreshCounts();
   } catch (e) {
@@ -335,15 +364,25 @@ async function act(id, action, btn) {
 
 /* ---------- Escalations ---------- */
 
+async function resolveFromList(id, btn) {
+  btn.disabled = true;
+  try {
+    await api(`/api/reviews/${encodeURIComponent(id)}/resolve`, { method: "POST" });
+    state.rows = state.rows.filter((x) => x.id !== id);
+    if (state.selected === id) closeDetail();
+    renderList(false);
+    refreshCounts();
+    toast("Marked resolved and removed from Escalations");
+  } catch (err) { toast(err.message, true); btn.disabled = false; }
+}
+
 function escalationBlock(r, e, canAct) {
   if (!e || !e.ready) return "";
   const count = r.escalation_count || 0, open = r.escalation_open || 0;
   const summary = count
     ? `<p class="esc-summary"><span class="esc-count">${count}</span> ${count === 1 ? "email" : "emails"} sent to the team. Last ${ago(r.escalation_last_at)}.
        ${open > 1 ? `<b>${open - 1} follow-up${open - 1 === 1 ? "" : "s"} without resolution.</b>` : open === 1 ? "Waiting on the team." : "Resolved."}</p>` : "";
-  const buttons = canAct ? `<div class="actions">
-      <button class="btn" id="escalateBtn">${open ? "Follow up with the team" : "Escalate"}</button>
-      ${open ? `<button class="btn quiet" data-act="resolve">Mark resolved</button>` : ""}</div>` : "";
+  const buttons = canAct && open ? `<div class="actions"><button class="btn quiet" data-act="resolve">Mark resolved</button></div>` : "";
   if (!summary && !buttons) return "";
   return `<div class="esc-block"><h3>Escalation</h3>${summary}${buttons}</div>`;
 }
@@ -448,6 +487,7 @@ function renderEscalate(data) {
         const i = state.rows.findIndex((x) => x.id === r.id);
         if (i >= 0) { state.rows[i] = data2.review; renderList(false); }
         toast("Email sent to the team");
+        refreshCounts();
       } catch (err) {
         ev.target.disabled = false; ev.target.textContent = "Send email";
         if (err.data && err.data.signIn) {
