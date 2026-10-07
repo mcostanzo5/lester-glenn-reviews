@@ -28,6 +28,11 @@ async function api(path, opts = {}) {
   }
   const res = await fetch(path, init);
   const data = await res.json().catch(() => ({ error: `The server returned an unexpected response (${res.status}).` }));
+  if (res.status === 401) {
+    // Session expired: send them back through Microsoft sign-in, then return here
+    location.href = `/auth/login?returnTo=${encodeURIComponent(location.pathname)}`;
+    throw new Error("Signing you in again\u2026");
+  }
   if (!res.ok) { const e = new Error(data.error || `Request failed (${res.status})`); e.status = res.status; throw e; }
   return data;
 }
@@ -78,7 +83,7 @@ async function boot() {
   try {
     state.me = await api("/api/me");
   } catch (e) {
-    document.body.innerHTML = `<div class="gate"><h1>Can't open the dashboard</h1><p>${esc(e.message)}</p></div>`;
+    document.body.innerHTML = `<div class="gate"><h1>Can't open the dashboard</h1><p>${esc(e.message)}</p><p><a href="/auth/logout">Sign out</a></p></div>`;
     return;
   }
   const m = state.me;
@@ -450,7 +455,7 @@ async function renderSettings() {
           <div class="checks">${users.rooftops.filter((r) => r.key !== "other").map((r) => `<label><input type="checkbox" value="${esc(r.key)}"> ${esc(r.name.replace(/^Lester Glenn /, ""))}</label>`).join("")}</div></fieldset>
         <button class="btn primary" id="saveUser">Save person</button>
       </form>
-      <p class="note" style="margin-top:12px">They also need to be allowed in your Cloudflare Access policy to reach the sign-in page.</p></div>
+      <p class="note" style="margin-top:12px">They sign in with their Lester Glenn Microsoft account.</p></div>
   </div>
   <div class="panel"><h3>People with access</h3><div class="table-wrap"><table><thead><tr><th>Email</th><th>Role</th><th>Stores</th><th></th></tr></thead>
     <tbody id="userRows">${userRows}</tbody></table></div></div>

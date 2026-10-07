@@ -2,8 +2,10 @@ export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
   AGENT_MODE: string;
-  ACCESS_TEAM_DOMAIN: string;
-  ACCESS_AUD: string;
+  MS_TENANT_ID: string;
+  MS_CLIENT_ID: string;
+  MS_CLIENT_SECRET?: string;
+  SESSION_SECRET?: string;
   ADMIN_EMAILS: string;
   MAX_AGE_DAYS: string;
   MAX_DRAFTS_PER_RUN: string;

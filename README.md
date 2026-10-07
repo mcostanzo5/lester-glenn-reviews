@@ -17,7 +17,8 @@ same review.
 | `src/guidelines.ts` | Voice and rules Claude follows. Add your best real replies as examples here |
 | `src/rooftops.ts` | Store names, sign-offs, contacts, and phone numbers (blank phone = no phone in replies) |
 | `src/api.ts` | Dashboard API and statistics |
-| `src/auth.ts` | Verifies the Microsoft sign-in from Cloudflare Access and applies roles |
+| `src/msauth.ts` | Microsoft 365 sign-in: sends people to Microsoft and verifies who they are |
+| `src/auth.ts` | Applies roles (admin, manager, view only) to the signed-in person |
 | `public/` | The dashboard itself |
 | `migrations/` | Database tables |
 
@@ -60,22 +61,32 @@ It prints your site address, something like
 `https://lester-glenn-reviews.<your-subdomain>.workers.dev`. The dashboard will
 say sign-in isn't configured yet. That's expected until step 5 is done.
 
-**5. Turn on Microsoft sign-in (Cloudflare Access)**
-1. In the Cloudflare dashboard, open **Zero Trust**. Pick a team name when asked;
-   your team domain becomes `<team>.cloudflareaccess.com`.
-2. Go to **Settings > Authentication > Login methods > Add new > Azure AD** and
-   follow Cloudflare's Entra ID guide. This step needs your Microsoft 365 admin to
-   create the app registration and grant admin consent.
-3. Go to **Access > Applications > Add an application > Self-hosted**. Use your
-   `workers.dev` address (or a custom domain like `reviews.lesterglenn.com`) as
-   the application domain, and pick Azure AD as the login method.
-4. Add a policy: **Allow**, include **Emails ending in** `@lesterglenn.com`.
-5. Open the application's **Overview** and copy the **Application Audience (AUD) Tag**.
-6. In `wrangler.toml`, set `ACCESS_TEAM_DOMAIN` to `<team>.cloudflareaccess.com`
-   and `ACCESS_AUD` to that tag, then run `npm run deploy` again.
+**5. Turn on Microsoft 365 sign-in**
+
+The Worker signs people in with Microsoft directly. Only accounts in your own
+Microsoft tenant can get in. Someone with Entra admin rights does this part:
+
+1. In the Microsoft Entra admin center, go to **App registrations > New registration**.
+   - Name: `Lester Glenn Reviews`
+   - Supported account types: **Accounts in this organizational directory only** (single tenant)
+   - Redirect URI: platform **Web**, address `https://<your workers.dev address>/auth/callback`
+2. On the app's **Overview** page, copy the **Application (client) ID** and the
+   **Directory (tenant) ID**.
+3. Under **Certificates & secrets > New client secret**, pick an expiry (24 months
+   is the longest), and copy the secret's **Value** right away. It's only shown once.
+   Put a reminder on the calendar to renew it before it expires.
+4. Under **API permissions**, make sure Microsoft Graph has the delegated
+   permissions `openid`, `profile`, `email`, and `User.Read`, then click
+   **Grant admin consent**.
+
+Then connect it:
+
+5. In `wrangler.toml`, set `MS_TENANT_ID` and `MS_CLIENT_ID` to the two IDs and deploy.
+6. Add the secret: `npx wrangler secret put MS_CLIENT_SECRET` (or in the Cloudflare
+   dashboard: Worker > Settings > Variables and Secrets > Add > Secret).
 
 **6. Try it**
-Open the site and sign in with Microsoft. Go to **Settings**, click **Load sample
+Open the site. You're sent to Microsoft to sign in, then back to the dashboard. Go to **Settings**, click **Load sample
 data**, then **Run agent now**. The inbox fills with drafted sample reviews and
 Statistics shows six months of sample history.
 
@@ -87,7 +98,9 @@ In **Settings**, add each person's Microsoft email with a role:
 - **Admin:** everything, including settings and agent runs
 
 Check the stores a person should see, or leave them all unchecked for every
-store. Anyone in `ADMIN_EMAILS` in `wrangler.toml` is always an admin.
+store. Anyone in `ADMIN_EMAILS` in `wrangler.toml` is always an admin. Anyone in
+your Microsoft tenant can reach the sign-in page, but only people added here (or
+listed in `ADMIN_EMAILS`) can see anything after signing in.
 
 ## Going live
 
@@ -136,6 +149,9 @@ npm run dev
 ```
 Open `http://localhost:8787`. On localhost only, `.dev.vars` signs you in without
 Microsoft. Never deploy `.dev.vars`.
+
+Sign-in sessions last 12 hours. Renewing the Microsoft client secret signs
+everyone out once, which is expected.
 
 ## Privacy and safety
 

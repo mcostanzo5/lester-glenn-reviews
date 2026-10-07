@@ -48,6 +48,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .mode-chip { font-size: 13px; font-weight: 600; padding: 3px 10px; border-radius: 999px; background: rgba(255,255,255,.18); }
 .mode-chip.live { background: #fff; color: var(--green); }
 .who { margin-left: auto; font-size: 14px; opacity: .9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.who .signout { color: #fff; margin-left: 10px; font-weight: 600; }
 .banner { background: var(--blue-wash); color: var(--blue-deep); padding: 9px 20px; font-size: 14px; font-weight: 500; border-bottom: 1px solid var(--line); }
 
 /* Layout */
@@ -187,7 +188,7 @@ code { background: var(--paper); padding: 1px 5px; border-radius: 4px; font-size
   .store-select select { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--panel); font-weight: 600; }
   .main { padding: 14px 14px 60px; }
   .topbar { padding: 10px 14px; }
-  .who { display: none; }
+  .who #who { display: none; }
   .row { grid-template-columns: 1fr; gap: 4px; }
   .row .when { text-align: left; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; order: -1; }
   .row .when br { display: none; }
