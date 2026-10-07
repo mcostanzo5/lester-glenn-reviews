@@ -33,7 +33,7 @@ async function api(path, opts = {}) {
     location.href = `/auth/login?returnTo=${encodeURIComponent(location.pathname)}`;
     throw new Error("Signing you in again\u2026");
   }
-  if (!res.ok) { const e = new Error(data.error || `Request failed (${res.status})`); e.status = res.status; throw e; }
+  if (!res.ok) { const e = new Error(data.error || `Request failed (${res.status})`); e.status = res.status; e.data = data; throw e; }
   return data;
 }
 
@@ -105,6 +105,8 @@ async function boot() {
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.selected) closeDetail(); });
   renderRail();
   setView("inbox");
+  const linked = new URLSearchParams(location.search).get("review");
+  if (linked) { openDetail(linked); history.replaceState(null, "", "/"); }
 }
 
 function renderRail() {
@@ -213,7 +215,7 @@ function rowHtml(r) {
   return `<button class="row" data-id="${esc(r.id)}" aria-current="${state.selected === r.id}">
     <div class="stars-col">${stars(r.stars)}</div>
     <div><div class="store">${esc(shortName(r.rooftop_key))}</div><div class="excerpt${r.text ? "" : " empty"}">${text}</div></div>
-    <div class="when">${ago(r.create_time)}<br>${pill(r.status, r.is_sample)}</div>
+    <div class="when">${ago(r.create_time)}<br>${pill(r.status, r.is_sample)}${r.escalation_count ? ` <span class="pill esc" title="Emails sent to the team about this review">\u2709 ${r.escalation_count}</span>` : ""}</div>
   </button>`;
 }
 
@@ -241,7 +243,9 @@ function closeDetail() {
 }
 window.closeDetail = closeDetail;
 
-function renderDetail({ review: r, events }) {
+function renderDetail(data) {
+  state.detail = data;
+  const { review: r, events, escalation } = data;
   const canAct = state.me.role !== "viewer";
   const answered = ANSWERED.includes(r.status);
   const live = state.me.mode === "live";
@@ -284,15 +288,19 @@ function renderDetail({ review: r, events }) {
     <blockquote>${r.text ? esc(r.text) : "<em>Rating only, no written review</em>"}</blockquote>
     ${reason}
     ${replyBlock}
+    ${escalationBlock(r, escalation, canAct)}
     <div class="history"><h3>History</h3>
       ${events.length ? `<ol>${events.map((e) => `<li><b>${esc(eventLabel(e.action))}</b> by ${esc(e.actor)}, ${ago(e.at)}${e.detail ? ". " + esc(e.detail) : ""}</li>`).join("")}</ol>` : `<p class="meta">No actions yet.</p>`}
     </div>`;
 
   $("#detail").querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => act(r.id, b.dataset.act, b)));
+  const escBtn = $("#escalateBtn");
+  if (escBtn) escBtn.onclick = () => renderEscalate(state.detail);
 }
 
 function eventLabel(a) {
-  return { drafted: "Drafted", edited: "Edited", approved: "Approved", posted: "Posted", dismissed: "Dismissed", reopened: "Reopened" }[a] || a;
+  return { drafted: "Drafted", edited: "Edited", approved: "Approved", posted: "Posted", dismissed: "Dismissed", reopened: "Reopened",
+    escalated: "Emailed the team", escalation_resolved: "Marked resolved" }[a] || a;
 }
 
 async function act(id, action, btn) {
@@ -312,7 +320,7 @@ async function act(id, action, btn) {
     const data = await api(`/api/reviews/${encodeURIComponent(id)}/${action}`, { method: "POST", body });
     renderDetail(data);
     const r = data.review;
-    toast({ approve: r.status === "approved_posted" ? "Reply posted to Google" : "Reply approved", save: "Edits saved", redraft: "New draft written", dismiss: "Review dismissed", reopen: "Moved back to inbox" }[action]);
+    toast({ approve: r.status === "approved_posted" ? "Reply posted to Google" : "Reply approved", save: "Edits saved", redraft: "New draft written", dismiss: "Review dismissed", reopen: "Moved back to inbox", resolve: "Escalation marked resolved" }[action]);
     const i = state.rows.findIndex((x) => x.id === id);
     if (i >= 0) state.rows[i] = r;
     if (state.view === "inbox") state.rows = state.rows.filter((x) => ["new", "pending", "error"].includes(x.status));
@@ -323,6 +331,134 @@ async function act(id, action, btn) {
     buttons.forEach((b) => (b.disabled = false));
     btn.textContent = old;
   }
+}
+
+/* ---------- Escalations ---------- */
+
+function escalationBlock(r, e, canAct) {
+  if (!e || !e.ready) return "";
+  const count = r.escalation_count || 0, open = r.escalation_open || 0;
+  const summary = count
+    ? `<p class="esc-summary"><span class="esc-count">${count}</span> ${count === 1 ? "email" : "emails"} sent to the team. Last ${ago(r.escalation_last_at)}.
+       ${open > 1 ? `<b>${open - 1} follow-up${open - 1 === 1 ? "" : "s"} without resolution.</b>` : open === 1 ? "Waiting on the team." : "Resolved."}</p>` : "";
+  const buttons = canAct ? `<div class="actions">
+      <button class="btn" id="escalateBtn">${open ? "Follow up with the team" : "Escalate"}</button>
+      ${open ? `<button class="btn quiet" data-act="resolve">Mark resolved</button>` : ""}</div>` : "";
+  if (!summary && !buttons) return "";
+  return `<div class="esc-block"><h3>Escalation</h3>${summary}${buttons}</div>`;
+}
+
+const FIELD_INPUTS = {
+  dms: ["Client / DMS #", "text"], client: ["Client name", "text"],
+  salesperson: ["Salesperson", "text"], deal: ["Deal #", "text"], dealDate: ["Deal date", "date"],
+  ro: ["RO #", "text"], roDate: ["RO date", "date"], advisor: ["Service advisor", "text"],
+};
+
+function renderEscalate(data) {
+  const { review: r, escalation: e } = data;
+  const guess = r.department === "sales" ? "sales" : r.department === "service" ? "service" : "";
+  const f = { concern: guess, fields: {}, note: "", wholeStore: false, extras: [], removed: new Set() };
+  const d = $("#detail");
+
+  const base = () => {
+    if (!f.concern) return [];
+    const teams = f.wholeStore ? ["store"] : e.teamsFor[f.concern];
+    return [...new Set(teams.flatMap((t) => e.teams[t] || []))];
+  };
+  const recipients = () => [...new Set([...base(), ...f.extras])].filter((a) => !f.removed.has(a));
+
+  const draw = () => {
+    const fieldsHtml = f.concern ? e.fieldsFor[f.concern].map((k) => {
+      const [label, type] = FIELD_INPUTS[k];
+      return `<label class="field">${label}<input type="${type}" data-field="${k}" value="${esc(f.fields[k] || "")}" autocomplete="off"></label>`;
+    }).join("") : "";
+    const list = recipients();
+    const emptyTeams = f.concern && !base().length;
+    const teamNames = f.wholeStore ? "entire store" : (e.teamsFor[f.concern] || []).join(" and ");
+    d.innerHTML = `
+      <div class="detail-head"><div><h2>Escalate to the team</h2><p class="meta">${esc(storeName(r.rooftop_key))}, ${r.stars || "no"} star review</p></div>
+        <button class="close" aria-label="Back to review" id="escBack">\u00d7</button></div>
+      ${!e.mailReady ? `<p class="late">Email sending isn't set up yet, so you can preview but not send. See the README.</p>`
+        : !e.canSend ? `<p class="late">Before you can send, <a href="/auth/logout">sign out</a> and sign back in once so Microsoft lets this app send from your mailbox. You can still fill this out and preview.</p>` : ""}
+      ${(r.escalation_open || 0) > 0 ? `<p class="note">This will be follow-up #${r.escalation_open} on this review.</p>` : ""}
+      <fieldset class="field concern"><legend>What is this about?</legend>
+        ${["sales", "service", "both", "other"].map((c) => `<label><input type="radio" name="concern" value="${c}" ${f.concern === c ? "checked" : ""}> ${{ sales: "Sales", service: "Service", both: "Both", other: "Other" }[c]}</label>`).join("")}
+      </fieldset>
+      ${f.concern ? `
+        <div class="esc-fields">${fieldsHtml}</div>
+        <p class="note">Customer details are optional. If you add any, the email opens with "We believe the customer that left the review is:". They go in the email only and aren't saved in the dashboard.</p>
+        <label class="field">Note<textarea id="escNote" rows="5" placeholder="What should the team do?">${esc(f.note)}</textarea></label>
+        <div class="field"><span>Send to</span>
+          <label class="check"><input type="checkbox" id="wholeStore" ${f.wholeStore ? "checked" : ""}> Send to the entire store instead</label>
+          ${emptyTeams ? `<p class="late">No ${teamNames} list for this store yet. Add one in Settings, or add people below.</p>` : ""}
+          <div class="chips">${list.map((a) => `<span class="chip">${esc(a)}<button type="button" aria-label="Remove ${esc(a)}" data-remove="${esc(a)}">\u00d7</button></span>`).join("") || `<span class="meta">Nobody yet</span>`}</div>
+          <div class="add-row"><input type="email" id="addEmail" placeholder="Add someone (name@${esc(e.domains[0] || "lesterglenn.com")})"><button class="btn" id="addBtn" type="button">Add</button></div>
+          <p class="meta">People added here are for this email only. It sends from your own mailbox, so replies come to you and a copy lands in your Sent Items.</p>
+        </div>
+        <div class="actions"><button class="btn primary" id="previewBtn">Preview email</button><button class="btn quiet" id="cancelEsc">Cancel</button></div>` : ""}`;
+
+    $("#escBack").onclick = () => renderDetail(state.detail);
+    d.querySelectorAll('input[name="concern"]').forEach((i) => (i.onchange = () => { save(); f.concern = i.value; f.removed.clear(); draw(); }));
+    if (!f.concern) return;
+    $("#cancelEsc").onclick = () => renderDetail(state.detail);
+    $("#wholeStore").onchange = (ev) => { save(); f.wholeStore = ev.target.checked; draw(); };
+    d.querySelectorAll("[data-remove]").forEach((b) => (b.onclick = () => { save(); f.removed.add(b.dataset.remove); f.extras = f.extras.filter((x) => x !== b.dataset.remove); draw(); }));
+    const add = () => {
+      const v = $("#addEmail").value.trim().toLowerCase();
+      if (!v) return;
+      const dom = v.split("@")[1];
+      if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(v) || !e.domains.includes(dom)) { toast(`Only ${e.domains.join(", ")} addresses can be added.`, true); return; }
+      save(); f.removed.delete(v); if (!f.extras.includes(v)) f.extras.push(v); draw(); $("#addEmail").focus();
+    };
+    $("#addBtn").onclick = add;
+    $("#addEmail").onkeydown = (ev) => { if (ev.key === "Enter") { ev.preventDefault(); add(); } };
+    $("#previewBtn").onclick = async (ev) => {
+      save();
+      ev.target.disabled = true;
+      try {
+        const p = await api(`/api/reviews/${encodeURIComponent(r.id)}/escalate`, { method: "POST", body: payload(true) });
+        preview(p);
+      } catch (err) { toast(err.message, true); ev.target.disabled = false; }
+    };
+  };
+
+  const save = () => {
+    d.querySelectorAll("[data-field]").forEach((i) => (f.fields[i.dataset.field] = i.value));
+    if ($("#escNote")) f.note = $("#escNote").value;
+  };
+  const payload = (isPreview) => ({ concern: f.concern, fields: f.fields, note: f.note, recipients: recipients(), preview: isPreview });
+
+  const preview = (p) => {
+    d.innerHTML = `
+      <div class="detail-head"><div><h2>Check and send</h2><p class="meta">From you (${esc(p.from)}) to ${p.recipients.length} ${p.recipients.length === 1 ? "person" : "people"}</p></div>
+        <button class="close" aria-label="Back to review" id="escBack">\u00d7</button></div>
+      <p class="meta"><b>To:</b> ${p.recipients.map(esc).join(", ")}</p>
+      <p class="meta"><b>Subject:</b> ${esc(p.subject)}</p>
+      <iframe class="email-preview" sandbox="" title="Email preview"></iframe>
+      <div class="actions"><button class="btn primary" id="sendBtn" ${e.mailReady ? "" : "disabled"}>Send email</button><button class="btn" id="editBtn">Edit</button></div>
+      <div id="signInAgain"></div>`;
+    d.querySelector(".email-preview").srcdoc = p.html;
+    $("#escBack").onclick = () => renderDetail(state.detail);
+    $("#editBtn").onclick = draw;
+    $("#sendBtn").onclick = async (ev) => {
+      ev.target.disabled = true; ev.target.textContent = "Sending\u2026";
+      try {
+        const data2 = await api(`/api/reviews/${encodeURIComponent(r.id)}/escalate`, { method: "POST", body: payload(false) });
+        renderDetail(data2);
+        const i = state.rows.findIndex((x) => x.id === r.id);
+        if (i >= 0) { state.rows[i] = data2.review; renderList(false); }
+        toast("Email sent to the team");
+      } catch (err) {
+        ev.target.disabled = false; ev.target.textContent = "Send email";
+        if (err.data && err.data.signIn) {
+          $("#signInAgain").innerHTML = `<p class="late" style="margin-top:12px">${esc(err.message)} Copy your note first, since signing out clears this form.</p>
+            <a class="btn" href="/auth/logout">Sign out</a>`;
+        } else toast(err.message, true);
+      }
+    };
+  };
+
+  draw();
 }
 
 /* ---------- Statistics ---------- */
@@ -417,8 +553,8 @@ async function renderSettings() {
   const v = $("#view");
   v.innerHTML = `<div class="empty-state">Loading settings\u2026</div>`;
   let users, runs;
-  let guide;
-  try { [users, runs, guide] = await Promise.all([api("/api/admin/users"), api("/api/admin/runs"), api("/api/admin/guidelines")]); }
+  let guide, teams;
+  try { [users, runs, guide, teams] = await Promise.all([api("/api/admin/users"), api("/api/admin/runs"), api("/api/admin/guidelines"), api("/api/admin/teams")]); }
   catch (e) { v.innerHTML = `<div class="empty-state"><strong>Settings didn't load</strong>${esc(e.message)}</div>`; return; }
   const m = state.me.mode;
   const modeText = {
@@ -458,6 +594,7 @@ async function renderSettings() {
       </form>
       <p class="note" style="margin-top:12px">They sign in with their Lester Glenn Microsoft account.</p></div>
   </div>
+  ${teamsPanel(teams, users.rooftops)}
   <div class="panel" id="guidePanel"><h3>Reply guidelines</h3>
     <p class="note">${guide.custom ? `Custom guidelines saved by ${esc(guide.updatedBy || "an admin")}${guide.updatedAt ? ", " + ago(guide.updatedAt) : ""}.` : "Using the built-in starter guidelines."}
       Claude follows these for every draft. Privacy and safety rules are always added on top, so they can't be edited away.</p>
@@ -487,6 +624,7 @@ async function renderSettings() {
   ${locRows ? `<div class="panel"><h3>Google locations</h3><div class="table-wrap"><table><thead><tr><th>Google listing</th><th>Matched store</th><th>History import</th><th>Last synced</th></tr></thead><tbody>${locRows}</tbody></table></div></div>` : ""}`;
 
   if (!guide.needsSetup) bindGuidelines();
+  if (teams.ready) bindTeams(teams);
   $("#runNow").onclick = async (e) => {
     const b = e.target; b.disabled = true; b.textContent = "Running\u2026";
     try {
@@ -520,6 +658,49 @@ async function renderSettings() {
       await api(`/api/admin/users?email=${encodeURIComponent(b.dataset.remove)}`, { method: "DELETE" });
       toast("Access removed"); renderSettings();
     } catch (err) { toast(err.message, true); }
+  };
+}
+
+function teamsPanel(t, rooftops) {
+  if (!t.ready) return `<div class="panel"><h3>Escalation teams</h3><p class="late">One-time setup needed: run the SQL in <code>migrations/0003_escalations.sql</code> in the D1 console, then reload this page.</p></div>`;
+  const stores = rooftops.filter((r) => r.key !== "other");
+  const count = (key, team) => (t.rows.find((x) => x.rooftop_key === key && x.team === team)?.emails || "").split(",").filter(Boolean).length;
+  return `<div class="panel" id="teamsPanel"><h3>Escalation teams</h3>
+    <p class="note">Who gets the email when someone escalates a review. Sales concerns go to the Sales list, Service to Service, Both to both lists, and Other to the Entire store list.
+      Each email sends from the Outlook mailbox of the person who escalates.</p>
+    <div class="table-wrap"><table><thead><tr><th>Store</th><th class="num">Sales</th><th class="num">Service</th><th class="num">Entire store</th></tr></thead><tbody>
+      ${stores.map((r) => `<tr><td>${esc(r.name.replace(/^Lester Glenn /, ""))}</td>${["sales", "service", "store"].map((tm) => `<td class="num ${count(r.key, tm) ? "" : "late"}">${count(r.key, tm) || "None"}</td>`).join("")}</tr>`).join("")}
+    </tbody></table></div>
+    <label class="field" style="margin-top:14px">Edit lists for<select id="teamStore">${stores.map((r) => `<option value="${esc(r.key)}">${esc(r.name)}</option>`).join("")}</select></label>
+    <div class="team-edit">
+      ${["sales", "service", "store"].map((tm) => `<label class="field">${{ sales: "Sales", service: "Service", store: "Entire store" }[tm]}
+        <textarea data-team="${tm}" rows="5" placeholder="One email per line"></textarea></label>`).join("")}
+    </div>
+    <p class="meta">Only ${t.domains.map(esc).join(", ")} addresses are allowed.</p>
+    <div class="actions"><button class="btn primary" id="saveTeams">Save lists for this store</button></div>
+  </div>`;
+}
+
+function bindTeams(t) {
+  const fill = () => {
+    const key = $("#teamStore").value;
+    document.querySelectorAll("[data-team]").forEach((ta) => {
+      ta.value = (t.rows.find((x) => x.rooftop_key === key && x.team === ta.dataset.team)?.emails || "").split(",").filter(Boolean).join("\n");
+    });
+  };
+  $("#teamStore").onchange = fill;
+  fill();
+  $("#saveTeams").onclick = async (e) => {
+    const body = { rooftop: $("#teamStore").value };
+    document.querySelectorAll("[data-team]").forEach((ta) => (body[ta.dataset.team] = ta.value));
+    e.target.disabled = true;
+    try {
+      await api("/api/admin/teams", { method: "POST", body });
+      toast("Lists saved");
+      const keep = body.rooftop;
+      await renderSettings();
+      $("#teamStore").value = keep; $("#teamStore").dispatchEvent(new Event("change"));
+    } catch (err) { toast(err.message, true); e.target.disabled = false; }
   };
 }
 

@@ -18,6 +18,8 @@ same review.
 | `src/learn.ts` | Writes new guidelines from your team's real replies (Settings > Reply guidelines) |
 | `src/rooftops.ts` | Store names, sign-offs, contacts, and phone numbers (blank phone = no phone in replies) |
 | `src/api.ts` | Dashboard API and statistics |
+| `src/escalate.ts` | Escalation emails to store teams: form rules, email template, counters |
+| `src/mail.ts` | Sends email through Microsoft 365 from the signed-in person's mailbox |
 | `src/msauth.ts` | Microsoft 365 sign-in: sends people to Microsoft and verifies who they are |
 | `src/auth.ts` | Applies roles (admin, manager, view only) to the signed-in person |
 | `public/` | The dashboard itself |
@@ -115,6 +117,44 @@ always added on top of whatever is saved.
 
 One-time setup: run the SQL in `migrations/0002_settings.sql` in the D1 console
 before using this panel.
+
+## Escalations
+
+Anyone with manager or admin access can open a review and click **Escalate**
+(or **Follow up with the team** if it's already been escalated). They pick
+Sales, Service, Both, or Other, add optional customer details and a note,
+adjust who it goes to, preview the email, and send.
+
+- **Team lists** live in **Settings > Escalation teams**, per store: Sales,
+  Service, and Entire store. Sales concerns go to Sales, Service to Service,
+  Both to both lists, Other to Entire store. The person escalating can switch to
+  the entire store, remove people, or add one-off people for that email only.
+- Only addresses on the domains in `MAIL_ALLOWED_DOMAINS` can receive escalations.
+- Emails send from the escalating person's own Microsoft 365 mailbox, so
+  replies go to them and a copy lands in their Sent Items.
+- Each review shows how many emails have been sent about it, when the last one
+  went out, and how many follow-ups have gone out without resolution. **Mark
+  resolved** resets the follow-up count; the total keeps counting.
+- Customer details typed into the form go in the email only. The dashboard
+  stores who sent it, when, to whom, and the concern type, but not the customer
+  details or the note.
+
+**How sending works.** At sign-in, Microsoft asks each person once to let the app
+send email as them (or IT approves it for everyone). The app gets a token that
+can only send as that person, stores it encrypted, and deletes it when they sign
+out. If a token stops working, the dashboard asks them to sign out and back in.
+
+**One-time setup**
+1. Run the SQL in `migrations/0003_escalations.sql` in the D1 console. Run it
+   once only (a second run gives harmless "duplicate column" errors). Then run
+   `migrations/0004_user_tokens.sql`.
+2. IT adds two **delegated** Microsoft Graph permissions to the Lester Glenn
+   Reviews app registration, **Mail.Send** and **offline_access**, and clicks
+   **Grant admin consent**. Delegated Mail.Send only allows sending as the person
+   who is signed in. No shared mailbox is needed.
+3. In `wrangler.toml`, `MAIL_ALLOWED_DOMAINS` controls which domains can receive
+   escalations (default `lesterglenn.com`, comma-separated for more).
+4. Everyone who was already signed in signs out and back in once.
 
 ## Going live
 

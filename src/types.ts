@@ -6,6 +6,7 @@ export interface Env {
   MS_CLIENT_ID: string;
   MS_CLIENT_SECRET?: string;
   SESSION_SECRET?: string;
+  MAIL_ALLOWED_DOMAINS?: string;
   ADMIN_EMAILS: string;
   MAX_AGE_DAYS: string;
   MAX_DRAFTS_PER_RUN: string;
@@ -60,10 +61,16 @@ export interface ReviewRow {
   decided_by: string | null;
   decided_at: string | null;
   is_sample: number;
+  escalation_count?: number;      // emails sent about this review, ever
+  escalation_open?: number;       // sends since the last "resolved"
+  escalation_first_at?: string | null;
+  escalation_last_at?: string | null;
+  escalation_resolved_at?: string | null;
 }
 
 export interface User {
   email: string;
+  name?: string;
   role: "admin" | "manager" | "viewer";
   rooftops: string[] | "*";
 }

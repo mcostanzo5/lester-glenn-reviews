@@ -20,7 +20,7 @@ export default {
     }
     if (url.pathname === "/auth/login") return login(req, env);
     if (url.pathname === "/auth/callback") return callback(req, env);
-    if (url.pathname === "/auth/logout") return logout();
+    if (url.pathname === "/auth/logout") return logout(req, env);
 
     // Dashboard files: only for signed-in people
     if (!url.pathname.startsWith("/api/")) {

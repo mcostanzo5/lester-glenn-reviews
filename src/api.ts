@@ -8,6 +8,8 @@ import { draftAndRoute, logEvent, postReply, runAgent } from "./agent";
 import { clearSamples, loadSamples } from "./samples";
 import { availableReplies, learnGuidelines, MIN_REPLIES } from "./learn";
 import { clearGuidelinesCache, currentGuidelines } from "./guidelines";
+import { CONCERN_LABEL, FIELDS_FOR, TEAMS_FOR, buildEmail, getTeams, parseEscalation, resolveEscalation, saveTeams, sendEscalation, type Team } from "./escalate";
+import { allowedDomains, canSendAs, checkAddresses, mailConfigured, MailError } from "./mail";
 
 const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external')";
 const OPEN_SQL = "('new','pending','ready','approved','error','old_unanswered')";
@@ -78,10 +80,19 @@ async function reviewDetail(env: Env, user: User, id: string) {
   const r = await getReview(env, id);
   if (!r || !canSee(user, r.rooftop_key)) return fail("Review not found.", 404);
   const events = (await env.DB.prepare("SELECT actor, action, detail, at FROM events WHERE review_id = ? ORDER BY id DESC LIMIT 50").bind(id).all()).results;
-  return json({ review: r, events });
+  let escalation: any = { ready: false };
+  try {
+    const sent = (await env.DB.prepare("SELECT concern, recipients, followup_number, sent_by, sent_at FROM escalations WHERE review_id = ? ORDER BY id DESC LIMIT 25").bind(id).all()).results;
+    escalation = {
+      ready: true, mailReady: mailConfigured(env), canSend: await canSendAs(env, user.email), domains: allowedDomains(env),
+      teams: canAct(user, r.rooftop_key) ? await getTeams(env, r.rooftop_key) : null,
+      teamsFor: TEAMS_FOR, fieldsFor: FIELDS_FOR, labels: CONCERN_LABEL, sent,
+    };
+  } catch { /* migration 0003 not run yet */ }
+  return json({ review: r, events, escalation });
 }
 
-async function reviewAction(env: Env, user: User, id: string, action: string, body: any) {
+async function reviewAction(env: Env, user: User, id: string, action: string, body: any, origin: string) {
   const r = await getReview(env, id);
   if (!r || !canSee(user, r.rooftop_key)) return fail("Review not found.", 404);
   if (!canAct(user, r.rooftop_key)) return fail("You have view-only access to this store.", 403);
@@ -108,6 +119,20 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
   } else if (action === "reopen") {
     await env.DB.prepare("UPDATE reviews SET status='pending' WHERE id=?").bind(id).run();
     await logEvent(env, id, user.email, "reopened");
+  } else if (action === "escalate") {
+    const parsed = parseEscalation(env, body);
+    if (!parsed.input) return fail(parsed.error!);
+    if (body?.preview) {
+      const email = buildEmail(r, parsed.input, user, origin, nowIso());
+      return json({ subject: email.subject, html: email.html, recipients: parsed.input.recipients, from: user.email });
+    }
+    try { await sendEscalation(env, r, parsed.input, user, origin); }
+    catch (e) {
+      if (e instanceof MailError && e.needsSignIn) return json({ error: e.message, signIn: true }, 409);
+      return fail((e as Error).message, e instanceof MailError ? 502 : 500);
+    }
+  } else if (action === "resolve") {
+    await resolveEscalation(env, r, user);
   } else if (action === "redraft") {
     await draftAndRoute(env, r, user.email, true);
   } else {
@@ -211,6 +236,24 @@ async function admin(env: Env, user: User, req: Request, path: string, url: URL,
     await logEvent(env, null, user.email, body?.action === "reset" ? "guidelines_reset" : "guidelines_saved");
     return json({ ok: true });
   }
+  if (path === "/api/admin/teams" && req.method === "GET") {
+    try {
+      const rows = (await env.DB.prepare("SELECT rooftop_key, team, emails, updated_by, updated_at FROM team_lists").all<any>()).results;
+      return json({ ready: true, rows, domains: allowedDomains(env), mailReady: mailConfigured(env) });
+    } catch { return json({ ready: false }); }
+  }
+  if (path === "/api/admin/teams" && req.method === "POST") {
+    const rooftop = String(body?.rooftop || "");
+    if (![...ROOFTOPS, DEFAULT_ROOFTOP].some((r) => r.key === rooftop)) return fail("Pick a store.");
+    const lists = {} as Record<Team, string[]>;
+    for (const t of ["sales", "service", "store"] as Team[]) {
+      const { ok, bad } = checkAddresses(env, body?.[t]);
+      if (bad.length) return fail(`Can't use: ${bad.join(", ")}. Only ${allowedDomains(env).join(", ")} addresses are allowed.`);
+      lists[t] = ok;
+    }
+    await saveTeams(env, rooftop, lists, user.email);
+    return json({ ok: true });
+  }
   if (path === "/api/admin/runs") {
     const [runs, locs] = await env.DB.batch([
       env.DB.prepare("SELECT * FROM runs ORDER BY id DESC LIMIT 20"),
@@ -238,7 +281,7 @@ export async function handleApi(req: Request, env: Env, user: User): Promise<Res
   if (m) {
     const id = decodeURIComponent(m[1]);
     if (!m[2] && req.method === "GET") return reviewDetail(env, user, id);
-    if (m[2] && req.method === "POST") return reviewAction(env, user, id, m[2], body);
+    if (m[2] && req.method === "POST") return reviewAction(env, user, id, m[2], body, url.origin);
   }
   return fail("Not found.", 404);
 }

@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { forgetRefreshToken, GRAPH_SCOPES, storeRefreshToken } from "./mail";
 
 // Microsoft 365 sign-in, handled entirely by the Worker.
 // Flow: /auth/login sends the person to Microsoft, Microsoft sends them back to
@@ -76,8 +77,12 @@ function redirectUri(req: Request): string {
 
 /** Signed-in email from the session cookie, or null. */
 export async function sessionEmail(req: Request, env: Env): Promise<string | null> {
-  const s = await unseal<{ e: string; x: number }>(env, getCookie(req, SESSION_COOKIE));
-  return s?.e ?? null;
+  return (await sessionUser(req, env))?.email ?? null;
+}
+
+export async function sessionUser(req: Request, env: Env): Promise<{ email: string; name?: string } | null> {
+  const s = await unseal<{ e: string; n?: string; x: number }>(env, getCookie(req, SESSION_COOKIE));
+  return s ? { email: s.e, name: s.n } : null;
 }
 
 export async function login(req: Request, env: Env): Promise<Response> {
@@ -93,7 +98,7 @@ export async function login(req: Request, env: Env): Promise<Response> {
     response_type: "code",
     redirect_uri: redirectUri(req),
     response_mode: "query",
-    scope: "openid profile email",
+    scope: `openid profile email ${GRAPH_SCOPES}`,
     state,
     nonce,
     code_challenge: challenge,
@@ -112,7 +117,7 @@ async function msKeys(env: Env, refresh = false): Promise<any[]> {
 }
 
 /** Checks the ID token's signature and claims. Returns the email or a reason it failed. */
-async function verifyIdToken(env: Env, token: string, nonce: string): Promise<{ email?: string; error?: string }> {
+async function verifyIdToken(env: Env, token: string, nonce: string): Promise<{ email?: string; name?: string; error?: string }> {
   const parts = token.split(".");
   if (parts.length !== 3) return { error: "malformed token" };
   const header = JSON.parse(dec.decode(fromB64url(parts[0])));
@@ -134,7 +139,7 @@ async function verifyIdToken(env: Env, token: string, nonce: string): Promise<{ 
   if (claims.nonce !== nonce) return { error: "sign-in attempt did not match" };
   const email = String(claims.email || claims.preferred_username || "").toLowerCase();
   if (!email.includes("@")) return { error: "no email on the Microsoft account" };
-  return { email };
+  return { email, name: typeof claims.name === "string" ? claims.name.slice(0, 120) : undefined };
 }
 
 export async function callback(req: Request, env: Env): Promise<Response> {
@@ -157,7 +162,7 @@ export async function callback(req: Request, env: Env): Promise<Response> {
       code: url.searchParams.get("code") || "",
       redirect_uri: redirectUri(req),
       code_verifier: pending.v,
-      scope: "openid profile email",
+      scope: `openid profile email ${GRAPH_SCOPES}`,
     }),
   });
   const data: any = await res.json().catch(() => ({}));
@@ -170,14 +175,20 @@ export async function callback(req: Request, env: Env): Promise<Response> {
     console.error("id token rejected:", result.error);
     return page("Sign-in not accepted", `The sign-in couldn't be verified (${result.error}).`, clearOauth);
   }
-  const session = await seal(env, { e: result.email, x: Date.now() + SESSION_HOURS * 3600_000 });
+  if (data.refresh_token) {
+    try { await storeRefreshToken(env, result.email, data.refresh_token); }
+    catch (e) { console.error("could not store mail token (run migrations/0004_user_tokens.sql)", e); }
+  }
+  const session = await seal(env, { e: result.email, n: result.name, x: Date.now() + SESSION_HOURS * 3600_000 });
   const headers = new Headers({ location: pending.r || "/", "cache-control": "no-store" });
   headers.append("set-cookie", clearOauth);
   headers.append("set-cookie", cookie(SESSION_COOKIE, session, SESSION_HOURS * 3600));
   return new Response(null, { status: 302, headers });
 }
 
-export function logout(): Response {
+export async function logout(req: Request, env: Env): Promise<Response> {
+  const who = await sessionEmail(req, env);
+  if (who) await forgetRefreshToken(env, who);
   return page("You're signed out", "You've been signed out of Lester Glenn Reviews.", cookie(SESSION_COOKIE, "", 0));
 }
 
