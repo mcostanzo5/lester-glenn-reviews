@@ -44,8 +44,13 @@ async function me(env: Env, user: User) {
     `SELECT rooftop_key, COUNT(*) n FROM reviews WHERE ${s.sql} AND status IN ${INBOX_SQL} GROUP BY rooftop_key`
   ).bind(...s.args).all<{ rooftop_key: string; n: number }>()).results;
   const map = Object.fromEntries(counts.map((c) => [c.rooftop_key, c.n]));
+  let escalations: number | null = null;
+  try {
+    escalations = (await env.DB.prepare(`SELECT COUNT(*) AS n FROM reviews WHERE ${s.sql} AND escalation_open > 0`)
+      .bind(...s.args).first<{ n: number }>())?.n ?? 0;
+  } catch { /* escalation columns not added yet */ }
   return json({
-    email: user.email, role: user.role, mode: mode(env),
+    email: user.email, role: user.role, mode: mode(env), escalations,
     rooftops: visibleRooftops(user).map((r) => ({ ...r, open: map[r.key] || 0 })),
   });
 }
@@ -57,6 +62,7 @@ async function listReviews(env: Env, user: User, url: URL) {
   const args = [...s.args];
   const status = url.searchParams.get("status");
   if (view === "inbox") where.push(`status IN ${INBOX_SQL}`);
+  else if (view === "escalations") where.push("escalation_open > 0");
   else if (status === "open") where.push(`status IN ${OPEN_SQL}`);
   else if (status === "answered") where.push(`status IN ${ANSWERED_SQL}`);
   else if (status) { where.push("status = ?"); args.push(status); }
@@ -66,7 +72,9 @@ async function listReviews(env: Env, user: User, url: URL) {
   const q = (url.searchParams.get("q") || "").trim();
   if (q) { where.push("(text LIKE ? OR draft LIKE ? OR reply_text LIKE ?)"); args.push(`%${q}%`, `%${q}%`, `%${q}%`); }
   const page = Math.max(0, parseInt(url.searchParams.get("page") || "0", 10) || 0);
-  const order = view === "inbox" ? "CASE status WHEN 'pending' THEN 0 WHEN 'error' THEN 1 WHEN 'new' THEN 2 ELSE 3 END, create_time ASC" : "create_time DESC";
+  const order = view === "inbox" ? "CASE status WHEN 'pending' THEN 0 WHEN 'error' THEN 1 WHEN 'new' THEN 2 ELSE 3 END, create_time ASC"
+    : view === "escalations" ? "escalation_first_at ASC" // longest-waiting first
+    : "create_time DESC";
   const rows = (await env.DB.prepare(`SELECT * FROM reviews WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT 51 OFFSET ?`)
     .bind(...args, page * 50).all<ReviewRow>()).results;
   return json({ reviews: rows.slice(0, 50), more: rows.length > 50, page });
