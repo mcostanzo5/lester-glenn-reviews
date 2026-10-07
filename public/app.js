@@ -396,7 +396,8 @@ const FIELD_INPUTS = {
 function renderEscalate(data) {
   const { review: r, escalation: e } = data;
   const guess = r.department === "sales" ? "sales" : r.department === "service" ? "service" : "";
-  const f = { concern: guess, fields: {}, note: "", wholeStore: false, extras: [], removed: new Set() };
+  const last = e.last;
+  const f = { concern: last ? last.concern : guess, fields: last ? { ...last.fields } : {}, note: "", wholeStore: false, extras: [], removed: new Set() };
   const d = $("#detail");
 
   const base = () => {
@@ -405,6 +406,14 @@ function renderEscalate(data) {
     return [...new Set(teams.flatMap((t) => e.teams[t] || []))];
   };
   const recipients = () => [...new Set([...base(), ...f.extras])].filter((a) => !f.removed.has(a));
+
+  // Follow-ups start with the same people as last time: anyone added then is
+  // added again, and anyone removed from the team list stays removed.
+  if (last) {
+    const before = base();
+    f.extras = last.recipients.filter((a) => !before.includes(a));
+    before.filter((a) => !last.recipients.includes(a)).forEach((a) => f.removed.add(a));
+  }
 
   const draw = () => {
     const fieldsHtml = f.concern ? e.fieldsFor[f.concern].map((k) => {
@@ -425,8 +434,9 @@ function renderEscalate(data) {
       </fieldset>
       ${f.concern ? `
         <div class="esc-fields">${fieldsHtml}</div>
-        <p class="note">Customer details are optional. If you add any, the email opens with "We believe the customer that left the review is:". They go in the email only and aren't saved in the dashboard.</p>
-        <label class="field">Note<textarea id="escNote" rows="5" placeholder="What should the team do?">${esc(f.note)}</textarea></label>
+        <p class="note">${last ? "Filled in from the last escalation on this review. Change anything that's different." : "Customer details are optional. If you add any, the email opens with \"We believe the customer that left the review is:\"."} They're saved with this review so follow-ups start filled in.</p>
+        ${last && last.note ? `<div class="last-note"><span>Last note sent</span>${esc(last.note)}</div>` : ""}
+        <label class="field">${last ? "Note for this follow-up" : "Note"}<textarea id="escNote" rows="5" placeholder="${last ? "What's changed, or what's still needed?" : "What should the team do?"}">${esc(f.note)}</textarea></label>
         <div class="field"><span>Send to</span>
           <label class="check"><input type="checkbox" id="wholeStore" ${f.wholeStore ? "checked" : ""}> Send to the entire store instead</label>
           ${emptyTeams ? `<p class="late">No ${teamNames} list for this store yet. Add one in Settings, or add people below.</p>` : ""}

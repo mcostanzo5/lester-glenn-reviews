@@ -160,6 +160,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .detail .field input[type="radio"], .detail .field input[type="checkbox"] { width: auto; padding: 0; margin: 0; accent-color: var(--blue); }
 .concern label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .check { font-weight: 400; display: flex; gap: 8px; align-items: center; margin: 4px 0 8px; }
+.last-note { background: var(--paper); border-left: 3px solid var(--line); padding: 8px 12px; margin: 0 0 12px; font-size: 14px; white-space: pre-wrap; color: var(--muted); }
+.last-note span { display: block; font-weight: 600; color: var(--ink); margin-bottom: 2px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .chip { display: inline-flex; align-items: center; gap: 4px; background: var(--blue-wash); color: var(--blue-deep); border-radius: 999px; padding: 3px 4px 3px 10px; font-size: 14px; font-weight: 500; }
 .chip button { border: 0; background: none; color: inherit; cursor: pointer; font-size: 16px; line-height: 1; padding: 0 4px; }
