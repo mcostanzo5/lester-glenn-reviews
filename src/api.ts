@@ -6,6 +6,8 @@ import { GBPClient } from "./gbp";
 import { cleanReply } from "./drafter";
 import { draftAndRoute, logEvent, postReply, runAgent } from "./agent";
 import { clearSamples, loadSamples } from "./samples";
+import { availableReplies, learnGuidelines, MIN_REPLIES } from "./learn";
+import { clearGuidelinesCache, currentGuidelines } from "./guidelines";
 
 const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external')";
 const OPEN_SQL = "('new','pending','ready','approved','error','old_unanswered')";
@@ -177,6 +179,37 @@ async function admin(env: Env, user: User, req: Request, path: string, url: URL,
       await env.DB.prepare("DELETE FROM users WHERE email = ?").bind((url.searchParams.get("email") || "").toLowerCase()).run();
       return json({ ok: true });
     }
+  }
+  if (path === "/api/admin/guidelines" && req.method === "GET") {
+    const g = await currentGuidelines(env, true);
+    let meta: any = null;
+    try { meta = await env.DB.prepare("SELECT updated_by, updated_at FROM settings WHERE key = 'guidelines'").first(); }
+    catch { return json({ text: g.text, custom: false, needsSetup: true, available: 0, minReplies: MIN_REPLIES }); }
+    return json({ text: g.text, custom: g.custom, updatedBy: meta?.updated_by, updatedAt: meta?.updated_at,
+      available: await availableReplies(env), minReplies: MIN_REPLIES });
+  }
+  if (path === "/api/admin/guidelines/learn" && req.method === "POST") {
+    const r = await learnGuidelines(env, body?.source === "pasted" ? "pasted" : "google", String(body?.text || ""));
+    return r.error ? fail(r.error, 400) : json(r);
+  }
+  if (path === "/api/admin/guidelines" && req.method === "POST") {
+    const save = env.DB.prepare(`INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?,?,?,?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_by=excluded.updated_by, updated_at=excluded.updated_at`);
+    const current = await env.DB.prepare("SELECT value FROM settings WHERE key = 'guidelines'").first<{ value: string }>().catch(() => null);
+    if (body?.action === "reset") {
+      if (current) await env.DB.batch([save.bind("guidelines_previous", current.value, user.email, nowIso()),
+        env.DB.prepare("DELETE FROM settings WHERE key = 'guidelines'")]);
+    } else {
+      const text = String(body?.text || "").replace(/\s*\u2014\s*/g, ", ").trim();
+      if (text.length < 200) return fail("The guidelines look too short to save.");
+      if (text.length > 30_000) return fail("The guidelines are too long. Keep them under 30,000 characters.");
+      const writes = [save.bind("guidelines", text, user.email, nowIso())];
+      if (current) writes.unshift(save.bind("guidelines_previous", current.value, user.email, nowIso()));
+      await env.DB.batch(writes);
+    }
+    clearGuidelinesCache();
+    await logEvent(env, null, user.email, body?.action === "reset" ? "guidelines_reset" : "guidelines_saved");
+    return json({ ok: true });
   }
   if (path === "/api/admin/runs") {
     const [runs, locs] = await env.DB.batch([

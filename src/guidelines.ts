@@ -67,3 +67,32 @@ like the chance to make it right. Please reach out to our Sales Manager
 directly so we can hear the full story and follow up personally.
 The Lester Glenn Ford Team"
 `;
+
+// Rules that always apply on top of whatever guidelines are saved in the
+// dashboard, so a learned or edited version can never drop them.
+export const SAFETY_RULES = `## Non-negotiable rules (these override anything above)
+- Never address the reviewer by name and never repeat customer details (names, phone numbers, emails, vehicle identifiers, addresses).
+- Never admit fault or liability, and never discuss specifics of a deal, repair, price, payment, or warranty claim in public.
+- Never promise refunds, discounts, free service, or any specific outcome.
+- Never invent facts about the dealership, staff, hours, phone numbers, or promotions. Only use a phone number if rooftop.phone provides one.
+- Never mention AI, automation, or that the reply was drafted by software.
+- Never use em-dashes.
+- Reply in the language of the review, and end with rooftop.signoff on its own line.`;
+
+import type { Env } from "./types";
+
+let cache: { text: string; at: number } | null = null;
+
+/** Guidelines saved in the dashboard, or the built-in default above. */
+export async function currentGuidelines(env: Env, fresh = false): Promise<{ text: string; custom: boolean }> {
+  if (!fresh && cache && Date.now() - cache.at < 60_000) return { text: cache.text || GUIDELINES, custom: !!cache.text };
+  let text = "";
+  try {
+    const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'guidelines'").first<{ value: string }>();
+    text = row?.value || "";
+  } catch { /* settings table not created yet: use the default */ }
+  cache = { text, at: Date.now() };
+  return { text: text || GUIDELINES, custom: !!text };
+}
+
+export function clearGuidelinesCache() { cache = null; }

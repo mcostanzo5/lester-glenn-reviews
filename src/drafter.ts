@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 import type { DraftResult } from "./router";
 import type { Rooftop } from "./rooftops";
-import { GUIDELINES } from "./guidelines";
+import { currentGuidelines, SAFETY_RULES } from "./guidelines";
 import { Budget, unlimited } from "./budget";
 
 const CONTRACT = `
@@ -39,14 +39,14 @@ export async function draftReply(env: Env, stars: number, text: string, rooftop:
       body: JSON.stringify({
         model: env.CLAUDE_MODEL || "claude-sonnet-5",
         max_tokens: 800,
-        system: GUIDELINES + "\n\n" + CONTRACT,
+        system: (await currentGuidelines(env)).text + "\n\n" + SAFETY_RULES + "\n\n" + CONTRACT,
         messages: [{ role: "user", content: JSON.stringify(payload) }],
       }),
     });
-       if (!res.ok) {
-         const err: any = await res.json().catch(() => ({}));
-         return failed(`Claude API error ${res.status}: ${String(err?.error?.message || "no details").slice(0, 200)}`);
-       }
+    if (!res.ok) {
+      const err: any = await res.json().catch(() => ({}));
+      return failed(`Claude API error ${res.status}: ${String(err?.error?.message || "no details").slice(0, 200)}`);
+    }
     const data: any = await res.json();
     const raw = (data.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
     const body = raw.replace(/^```(?:json)?|```$/gm, "").trim();
