@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lester Glenn Reviews</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⭐</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="brand-mark" aria-hidden="true"></span>Lester Glenn Reviews</div>
+  <div class="mode-chip" id="modeChip" hidden></div>
+  <div class="who" id="who"></div>
+</header>
+<div class="banner" id="banner" hidden></div>
+<div class="shell">
+  <nav class="rail" id="rail" aria-label="Stores"></nav>
+  <main class="main">
+    <div class="tabs" role="tablist" id="tabs">
+      <button role="tab" data-view="inbox" aria-selected="true">Inbox</button>
+      <button role="tab" data-view="all">All reviews</button>
+      <button role="tab" data-view="stats">Statistics</button>
+      <button role="tab" data-view="settings" id="settingsTab" hidden>Settings</button>
+    </div>
+    <label class="store-select"><span class="sr">Store</span><select id="storeSelect"></select></label>
+    <section id="view" aria-live="polite"></section>
+  </main>
+  <aside class="detail" id="detail" hidden aria-label="Review detail"></aside>
+</div>
+<div class="toast" id="toast" role="status" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+name = "lester-glenn-reviews"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+# Dashboard files. API routes run through the Worker first.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "lester-glenn-reviews"
+database_id = "REPLACE_WITH_DATABASE_ID"
+migrations_dir = "migrations"
+
+# Cloudflare schedules in UTC, which doesn't change for daylight saving. The
+# Worker wakes at both possible UTC times for each run and only works when it
+# is one of RUN_HOURS_ET in New York, so runs stay at 8am, 12pm, 4pm, 8pm
+# Eastern all year. If you change RUN_HOURS_ET, add the matching UTC hours
+# here (Eastern hour + 4 and + 5).
+[triggers]
+crons = ["0 0,1,12,13,16,17,20,21 * * *"]
+
+[vars]
+# dry_run: sample data only | shadow: reads Google, never posts | live: posts replies
+AGENT_MODE = "dry_run"
+# From Cloudflare Zero Trust, filled in during setup (see README)
+ACCESS_TEAM_DOMAIN = ""
+ACCESS_AUD = ""
+# Always admins, even before anyone is added in Settings
+ADMIN_EMAILS = "mcostanzo@lesterglenn.com"
+MAX_AGE_DAYS = "14"
+MAX_DRAFTS_PER_RUN = "25"
+AUTO_POST_MIN_STARS = "4"
+CLAUDE_MODEL = "claude-sonnet-5"
+# Hours (24h, Eastern) when scheduled runs happen
+RUN_HOURS_ET = "8,12,16,20"
+# Max Google + Claude calls per run. Free plan limit is 50; keep 45 there.
+# On Workers Paid, raise to 900 so the history import finishes faster.
+EXTERNAL_REQUEST_BUDGET = "45"
+# Pages of older reviews (50 each) imported per run for statistics
+BACKFILL_PAGES_PER_RUN = "20"
+
+# Secrets (set with: npx wrangler secret put NAME)
+# GBP_CLIENT_ID, GBP_CLIENT_SECRET, GBP_REFRESH_TOKEN, ANTHROPIC_API_KEY
