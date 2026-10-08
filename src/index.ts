@@ -25,7 +25,7 @@ export default {
     // Dashboard files: only for signed-in people
     if (!url.pathname.startsWith("/api/")) {
       if (!local && !(await sessionEmail(req, env))) {
-        return Response.redirect(`${url.origin}/auth/login?returnTo=${encodeURIComponent(url.pathname)}`, 302);
+        return Response.redirect(`${url.origin}/auth/login?returnTo=${encodeURIComponent(url.pathname + url.search)}`, 302);
       }
       return env.ASSETS.fetch(req);
     }

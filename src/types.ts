@@ -7,6 +7,7 @@ export interface Env {
   MS_CLIENT_SECRET?: string;
   SESSION_SECRET?: string;
   MAIL_ALLOWED_DOMAINS?: string;
+  REPLY_APPROVERS?: string;
   ADMIN_EMAILS: string;
   MAX_AGE_DAYS: string;
   MAX_DRAFTS_PER_RUN: string;
@@ -71,8 +72,11 @@ export interface ReviewRow {
 export interface User {
   email: string;
   name?: string;
-  role: "admin" | "manager" | "viewer";
+  // "link": signed in with Microsoft but not added to the dashboard. They can only
+  // open reviews that were escalated to them, read-only.
+  role: "admin" | "manager" | "viewer" | "link";
   rooftops: string[] | "*";
+  canReply: boolean; // may approve, edit, redraft or dismiss replies (REPLY_APPROVERS)
 }
 
 export function mode(env: Env): Mode {
