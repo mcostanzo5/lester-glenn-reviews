@@ -15,6 +15,7 @@ same review.
 | `src/agent.ts` | Scheduled run: sync reviews from Google, draft with Claude, route, post |
 | `src/router.ts` | Rules for what can auto-post, including the keyword list that always goes to a manager |
 | `src/guidelines.ts` | Built-in starter guidelines, plus the safety rules that always apply |
+| `src/staff.ts` | Finds employee names in reviews, matches them to each store's roster, tallies by month |
 | `src/learn.ts` | Writes new guidelines from your team's real replies (Settings > Reply guidelines) |
 | `src/rooftops.ts` | Store names, sign-offs, contacts, and phone numbers (blank phone = no phone in replies) |
 | `src/api.ts` | Dashboard API and statistics |
@@ -92,6 +93,53 @@ Then connect it:
 Open the site. You're sent to Microsoft to sign in, then back to the dashboard. Go to **Settings**, click **Load sample
 data**, then **Run agent now**. The inbox fills with drafted sample reviews and
 Statistics shows six months of sample history.
+
+## Staff tallies
+
+The **Staff** tab counts how many reviews name each salesperson, service advisor,
+or other employee, for any range of calendar months (Eastern time), split by
+4 to 5 stars, 3 stars, and 1 to 2 stars. Click a name to see the reviews, or
+download a CSV.
+
+- **Reading reviews for names.** Claude reads each review for employee names and
+  whether they're in sales or service, 25 reviews per request. New reviews are
+  read automatically on each agent run. For older months, pick the range on the
+  Staff tab and click **Read reviews now**. If a customer edits a review, it's
+  read again.
+- **Rosters.** Each store has a staff roster (Staff tab, bottom). Names are
+  matched to that store's roster: full name or nickname first, then first name
+  plus last name or last initial, then the sales or service hint from the review.
+  Add nicknames (Mike for Michael) so more names match on their own.
+- **Two people with the same first name.** If the review can't tell them apart
+  (for example two sales Mikes), the mention goes to **Needs tagging** and isn't
+  counted until someone picks the right person. Hand tags are never changed by
+  the agent, including if the review is read again.
+- **Who can tag.** Admins and reply approvers can tag and edit rosters. Managers
+  and view-only users can see tallies for their stores. People who leave can be
+  set inactive; their past counts stay.
+
+One-time setup: run `migrations/0006_staff_mentions.sql` in the D1 console.
+
+## Who can do what
+
+| | Approvers | Admins | Managers | View only | Escalation recipients |
+|---|---|---|---|---|---|
+| Approve, edit, redraft, dismiss replies | Yes | Only if also an approver | No | No | No |
+| See drafts | Yes | Yes (read-only) | Yes (read-only) | Yes (read-only) | No |
+| Escalate, follow up, mark resolved | Yes | Yes | Their stores | No | No |
+| Inbox, all reviews, statistics | Yes | Yes | Their stores | Their stores | No |
+| Settings | If admin | Yes | No | No | No |
+| Open a review from an escalation email | Yes | Yes | Yes | Yes | Only reviews sent to them |
+
+**Approvers** are set in `REPLY_APPROVERS` in `wrangler.toml` (currently
+mcostanzo@ and mbellina@). An approver who isn't listed in Settings still gets
+in, with access to every store.
+
+**Escalation recipients** are anyone in the Microsoft tenant who isn't in
+Settings. When they open "Open the review" from an escalation email, they get a
+read-only page with the review, the escalation details and notes, and its
+history. They can only open reviews that were escalated to them; a forwarded
+link won't work for anyone else.
 
 ## Adding people
 
