@@ -5,6 +5,7 @@ import { matchRooftop, rooftopByKey } from "./rooftops";
 import { draftReply } from "./drafter";
 import { route } from "./router";
 import { Budget, BudgetExhausted, unlimited } from "./budget";
+import { scanReviews } from "./staff";
 
 const MAX_NEW_PAGES = 5; // only matters if a store gets 250+ new reviews between runs
 
@@ -27,8 +28,8 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
   if (!reviews.length) return 0;
   const ids = reviews.map((r) => r.id);
   const existing = new Map(
-    (await env.DB.prepare(`SELECT id, status, update_time, reply_source FROM reviews WHERE id IN (${ids.map(() => "?").join(",")})`)
-      .bind(...ids).all<{ id: string; status: Status; update_time: string; reply_source: string | null }>()).results.map((r) => [r.id, r])
+    (await env.DB.prepare(`SELECT id, status, update_time, reply_source, text FROM reviews WHERE id IN (${ids.map(() => "?").join(",")})`)
+      .bind(...ids).all<{ id: string; status: Status; update_time: string; reply_source: string | null; text: string }>()).results.map((r) => [r.id, r])
   );
   const stmt = env.DB.prepare(
     `INSERT INTO reviews (id, location_name, rooftop_key, location_title, stars, text, create_time, update_time,
@@ -61,6 +62,12 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
       status, g.reply_text, g.reply_time, replySource, nowIso());
   });
   await env.DB.batch(writes);
+  // If a customer edited their review text, read it again for staff names
+  const edited = reviews.filter((g) => existing.has(g.id) && existing.get(g.id)!.text !== g.text);
+  if (edited.length) {
+    try { await env.DB.batch(edited.map((g) => env.DB.prepare("UPDATE reviews SET mentions_scanned_at = NULL WHERE id = ?").bind(g.id))); }
+    catch { /* staff tables not set up yet */ }
+  }
   return reviews.length;
 }
 
@@ -230,7 +237,18 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
       }
     }
 
-    // 4. Older history for statistics, using whatever budget is left
+    // 4. Read new reviews for staff names (needs migration 0006; skipped quietly until then)
+    if (budget.has(2)) {
+      try {
+        const sc = await scanReviews(env, budget, { maxBatches: 2 });
+        if (sc.scanned) s.notes.push(`Read ${sc.scanned} reviews for staff names, found ${sc.found}.`);
+      } catch (e) {
+        if (e instanceof BudgetExhausted) throw e;
+        if (!/no such (table|column)/i.test((e as Error).message)) s.notes.push(`Staff names: ${(e as Error).message}`);
+      }
+    }
+
+    // 5. Older history for statistics, using whatever budget is left
     if (client && locs.length) s.synced += await backfill(env, client, locs, budget, s.notes);
   } catch (e) {
     if (e instanceof BudgetExhausted) s.notes.push(e.message);

@@ -30,6 +30,12 @@ const POOL: [number, string][] = [
   [2, "Appointment was at 8 and they did not start on my car until almost 11."],
   [2, "Felt rushed through the finance office."],
   [1, "Nobody returned my calls about a warranty repair for a week."],
+  [5, "Mike in sales was patient and never pushy. Dana in finance had the paperwork done in twenty minutes."],
+  [5, "Kaitlyn at the service desk kept me updated by text the whole day. Great experience."],
+  [4, "Jordan found me exactly the trim I wanted. Delivery took a bit long but Jordan stayed with me."],
+  [2, "Mike told me the car would be ready by noon and it wasn't ready until four."],
+  [5, "Mike S. in service explained every line on the invoice. First time I didn't feel upsold."],
+  [3, "Kaitlyn was nice but the wait for an oil change was over two hours."],
 ];
 
 const REPLIES: Record<string, string> = {
@@ -79,6 +85,10 @@ export async function loadSamples(env: Env): Promise<number> {
 }
 
 export async function clearSamples(env: Env): Promise<void> {
+  // Tables added by later setup steps may not exist yet, so each is cleared on its own
+  for (const sql of ["DELETE FROM mentions WHERE review_id LIKE 'sample/%'", "DELETE FROM escalations WHERE review_id LIKE 'sample/%'"]) {
+    try { await env.DB.prepare(sql).run(); } catch { /* not set up yet */ }
+  }
   await env.DB.batch([
     env.DB.prepare("DELETE FROM events WHERE review_id LIKE 'sample/%'"),
     env.DB.prepare("DELETE FROM reviews WHERE is_sample = 1"),

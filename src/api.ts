@@ -1,6 +1,6 @@
 import type { Env, ReviewRow, User } from "./types";
 import { mode, nowIso } from "./types";
-import { canAct, canSee } from "./auth";
+import { canAct, canSee, wasRecipient } from "./auth";
 import { ROOFTOPS, DEFAULT_ROOFTOP } from "./rooftops";
 import { GBPClient } from "./gbp";
 import { cleanReply } from "./drafter";
@@ -9,6 +9,8 @@ import { clearSamples, loadSamples } from "./samples";
 import { availableReplies, learnGuidelines, MIN_REPLIES } from "./learn";
 import { clearGuidelinesCache, currentGuidelines } from "./guidelines";
 import { CONCERN_LABEL, FIELDS_FOR, TEAMS_FOR, buildEmail, lastEscalation, getTeams, parseEscalation, resolveEscalation, saveTeams, sendEscalation, type Team } from "./escalate";
+import { Budget } from "./budget";
+import { canTag, monthRange, norm, parseRosterLines, rematch, scanReviews, type Staff } from "./staff";
 import { allowedDomains, canSendAs, checkAddresses, mailConfigured, MailError } from "./mail";
 
 const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external')";
@@ -50,7 +52,9 @@ async function me(env: Env, user: User) {
       .bind(...s.args).first<{ n: number }>())?.n ?? 0;
   } catch { /* escalation columns not added yet */ }
   return json({
-    email: user.email, role: user.role, mode: mode(env), escalations,
+    email: user.email, name: user.name, role: user.role, canReply: user.canReply, mode: mode(env), escalations,
+    approvers: (env.REPLY_APPROVERS || "").split(",").map((e) => e.trim()).filter(Boolean),
+    storeNames: Object.fromEntries([...ROOFTOPS, DEFAULT_ROOFTOP].map((r) => [r.key, r.name])),
     rooftops: visibleRooftops(user).map((r) => ({ ...r, open: map[r.key] || 0 })),
   });
 }
@@ -69,6 +73,10 @@ async function listReviews(env: Env, user: User, url: URL) {
   const stars = url.searchParams.get("stars");
   if (stars === "low") where.push("stars <= 3");
   else if (stars === "high") where.push("stars >= 4");
+  const staffId = parseInt(url.searchParams.get("staff") || "", 10);
+  if (staffId) { where.push("id IN (SELECT review_id FROM mentions WHERE staff_id = ? AND match IN ('auto','manual'))"); args.push(staffId); }
+  const range = monthRange(url.searchParams.get("from") || "", url.searchParams.get("to") || "");
+  if (range) { where.push("create_time >= ? AND create_time < ?"); args.push(range[0], range[1]); }
   const q = (url.searchParams.get("q") || "").trim();
   if (q) { where.push("(text LIKE ? OR draft LIKE ? OR reply_text LIKE ?)"); args.push(`%${q}%`, `%${q}%`, `%${q}%`); }
   const page = Math.max(0, parseInt(url.searchParams.get("page") || "0", 10) || 0);
@@ -87,7 +95,13 @@ async function getReview(env: Env, id: string): Promise<ReviewRow | null> {
 
 async function reviewDetail(env: Env, user: User, id: string) {
   const r = await getReview(env, id);
-  if (!r || !canSee(user, r.rooftop_key)) return fail("Review not found.", 404);
+  const linkOk = user.role === "link" && r ? await wasRecipient(env, user.email, id) : false;
+  if (!r || !(canSee(user, r.rooftop_key) || linkOk)) {
+    return fail(user.role === "link"
+      ? "This review wasn't sent to you, so it can't be opened here. Ask the person who sent it, or an admin, for access."
+      : "Review not found.", 404);
+  }
+  if (user.role === "link") { r.draft = null; r.route_reason = null; r.risk_flags = null; }
   const events = (await env.DB.prepare("SELECT actor, action, detail, at FROM events WHERE review_id = ? ORDER BY id DESC LIMIT 50").bind(id).all()).results;
   let escalation: any = { ready: false };
   try {
@@ -96,17 +110,32 @@ async function reviewDetail(env: Env, user: User, id: string) {
       ready: true, mailReady: mailConfigured(env), canSend: await canSendAs(env, user.email), domains: allowedDomains(env),
       teams: canAct(user, r.rooftop_key) ? await getTeams(env, r.rooftop_key) : null,
       teamsFor: TEAMS_FOR, fieldsFor: FIELDS_FOR, labels: CONCERN_LABEL, sent,
-      last: canAct(user, r.rooftop_key) ? await lastEscalation(env, r) : null,
+      last: canAct(user, r.rooftop_key) || linkOk ? await lastEscalation(env, r) : null,
     };
   } catch { /* migration 0003 not run yet */ }
   delete (r as any).escalation_details;
-  return json({ review: r, events, escalation });
+  let staff: any = null;
+  if (user.role !== "link") {
+    try {
+      const mentions = (await env.DB.prepare(`SELECT m.id, m.name_raw, m.role_hint, m.sentiment, m.match, m.staff_id, s.full_name, s.role
+        FROM mentions m LEFT JOIN staff s ON s.id = m.staff_id WHERE m.review_id = ? ORDER BY m.id`).bind(id).all()).results;
+      staff = {
+        mentions, scanned: !!(r as any).mentions_scanned_at, canTag: canTag(user) && canSee(user, r.rooftop_key),
+        roster: canTag(user) ? (await env.DB.prepare("SELECT id, full_name, role, aliases, active FROM staff WHERE rooftop_key = ? ORDER BY full_name").bind(r.rooftop_key).all()).results : [],
+      };
+    } catch { /* migration 0006 not run yet */ }
+  }
+  return json({ review: r, events, escalation, staff });
 }
 
 async function reviewAction(env: Env, user: User, id: string, action: string, body: any, origin: string) {
   const r = await getReview(env, id);
   if (!r || !canSee(user, r.rooftop_key)) return fail("Review not found.", 404);
-  if (!canAct(user, r.rooftop_key)) return fail("You have view-only access to this store.", 403);
+  const replyActions = ["save", "approve", "dismiss", "reopen", "redraft"];
+  if (replyActions.includes(action) && !user.canReply) {
+    return fail(`Only ${(env.REPLY_APPROVERS || "the reply approvers").split(",").join(" and ")} can change replies.`, 403);
+  }
+  if (!replyActions.includes(action) && !canAct(user, r.rooftop_key)) return fail("You have view-only access to this store.", 403);
   const reply = typeof body?.reply === "string" ? cleanReply(body.reply) : "";
 
   if (action === "save") {
@@ -285,14 +314,152 @@ export async function handleApi(req: Request, env: Env, user: User): Promise<Res
     body = await req.json().catch(() => ({}));
   }
   if (path === "/api/me") return me(env, user);
+  if (user.role === "link" && !(req.method === "GET" && /^\/api\/reviews\/[^/]+$/.test(path))) {
+    return fail("You can open reviews from escalation emails. Ask an admin if you need dashboard access.", 403);
+  }
   if (path === "/api/reviews" && req.method === "GET") return listReviews(env, user, url);
   if (path === "/api/stats") return stats(env, user, url);
   if (path.startsWith("/api/admin/")) return admin(env, user, req, path, url, body);
+  if (path.startsWith("/api/staff")) return staffApi(env, user, req, path, url, body);
   const m = path.match(/^\/api\/reviews\/([^/]+)(?:\/([a-z]+))?$/);
   if (m) {
     const id = decodeURIComponent(m[1]);
     if (!m[2] && req.method === "GET") return reviewDetail(env, user, id);
     if (m[2] && req.method === "POST") return reviewAction(env, user, id, m[2], body, url.origin);
   }
+  return fail("Not found.", 404);
+}
+
+/* ---------- Staff tallies ---------- */
+
+async function staffApi(env: Env, user: User, req: Request, path: string, url: URL, body: any): Promise<Response> {
+  const sc = scope(user, env, url.searchParams.get("rooftop") || body?.rooftop || null);
+  try { await env.DB.prepare("SELECT 1 FROM staff LIMIT 1").first(); }
+  catch { return json({ ready: false }); }
+
+  // Tally for a range of calendar months
+  if (path === "/api/staff/tally" && req.method === "GET") {
+    const range = monthRange(url.searchParams.get("from") || "", url.searchParams.get("to") || "");
+    if (!range) return fail("Pick a valid month range.");
+    const role = url.searchParams.get("role");
+    const mScope = sc.sql.replace(/\brooftop_key\b/g, "m.rooftop_key").replace(/\bis_sample\b/g, "r.is_sample");
+    const roleSql = role && ["sales", "service", "other"].includes(role) ? " AND s.role = ?" : "";
+    const base = `FROM mentions m JOIN reviews r ON r.id = m.review_id WHERE ${mScope} AND m.review_time >= ? AND m.review_time < ?`;
+    const args = [...sc.args, range[0], range[1]];
+    const [people, unassigned, coverage] = await env.DB.batch([
+      env.DB.prepare(`SELECT s.id, s.full_name, s.rooftop_key, s.role, s.active,
+          COUNT(DISTINCT m.review_id) AS reviews,
+          COUNT(DISTINCT CASE WHEN m.stars >= 4 THEN m.review_id END) AS positive,
+          COUNT(DISTINCT CASE WHEN m.stars = 3 THEN m.review_id END) AS neutral,
+          COUNT(DISTINCT CASE WHEN m.stars BETWEEN 1 AND 2 THEN m.review_id END) AS negative,
+          ROUND(AVG(NULLIF(m.stars, 0)), 2) AS avg_stars
+        ${base.replace("FROM mentions m", "FROM mentions m JOIN staff s ON s.id = m.staff_id")} AND m.match IN ('auto','manual')${roleSql}
+        GROUP BY s.id ORDER BY reviews DESC, s.full_name`).bind(...args, ...(roleSql ? [role] : [])),
+      env.DB.prepare(`SELECT m.rooftop_key, MIN(m.name_raw) AS name, m.match, COUNT(DISTINCT m.review_id) AS reviews
+        ${base} AND m.match IN ('ambiguous','unmatched') GROUP BY m.rooftop_key, lower(m.name_raw), m.match ORDER BY reviews DESC`).bind(...args),
+      env.DB.prepare(`SELECT COUNT(*) AS total, SUM(mentions_scanned_at IS NOT NULL) AS scanned FROM reviews
+        WHERE ${sc.sql} AND create_time >= ? AND create_time < ?`).bind(...args),
+    ]);
+    return json({ ready: true, people: people.results, unassigned: unassigned.results, coverage: coverage.results[0], canTag: canTag(user) });
+  }
+
+  // Mentions waiting for someone to pick the right person
+  if (path === "/api/staff/untagged" && req.method === "GET") {
+    const range = monthRange(url.searchParams.get("from") || "", url.searchParams.get("to") || "");
+    if (!range) return fail("Pick a valid month range.");
+    const mScope = sc.sql.replace(/\brooftop_key\b/g, "m.rooftop_key").replace(/\bis_sample\b/g, "r.is_sample");
+    const rows = (await env.DB.prepare(`SELECT m.id, m.review_id, m.rooftop_key, m.name_raw, m.role_hint, m.match, m.stars, m.review_time, substr(r.text, 1, 400) AS text
+      FROM mentions m JOIN reviews r ON r.id = m.review_id
+      WHERE ${mScope} AND m.review_time >= ? AND m.review_time < ? AND m.match IN ('ambiguous','unmatched')
+      ORDER BY m.rooftop_key, lower(m.name_raw), m.review_time LIMIT 200`).bind(...sc.args, range[0], range[1]).all()).results;
+    return json({ mentions: rows });
+  }
+
+  if (path === "/api/staff/roster" && req.method === "GET") {
+    const staff = (await env.DB.prepare(`SELECT * FROM staff WHERE ${sc.sql.replace(/\bis_sample = 0( AND )?/, "") || "1=1"} ORDER BY rooftop_key, full_name`)
+      .bind(...sc.args).all<Staff>()).results;
+    return json({ staff, canTag: canTag(user) });
+  }
+
+  // Everything below changes data: admins and reply approvers only
+  if (!canTag(user)) return fail("Only admins and reply approvers can change staff tags.", 403);
+
+  if (path === "/api/staff/scan" && req.method === "POST") {
+    const range = monthRange(String(body?.from || ""), String(body?.to || ""));
+    if (!range) return fail("Pick a valid month range.");
+    try {
+      const r = await scanReviews(env, new Budget(10), { from: range[0], to: range[1], rooftops: user.rooftops, maxBatches: 4 });
+      return json(r);
+    } catch (e) { return fail((e as Error).message, 502); }
+  }
+
+  if (path === "/api/staff/roster" && req.method === "POST") {
+    const op = String(body?.op || "");
+    const findStaff = async (id: number) => {
+      const s = await env.DB.prepare("SELECT * FROM staff WHERE id = ?").bind(id).first<Staff>();
+      return s && canSee(user, s.rooftop_key) ? s : null;
+    };
+    const clean = (v: unknown, n: number) => String(v ?? "").replace(/\s+/g, " ").trim().slice(0, n);
+    const role = (v: unknown) => (["sales", "service", "other"].includes(String(v)) ? String(v) : "sales");
+    if (op === "add" || op === "bulk") {
+      const rooftop = String(body?.rooftop || "");
+      if (!canSee(user, rooftop) || ![...ROOFTOPS, DEFAULT_ROOFTOP].some((r) => r.key === rooftop)) return fail("Pick a store.");
+      const people = op === "bulk" ? parseRosterLines(String(body?.text || ""), role(body?.role) as any)
+        : [{ full_name: clean(body?.full_name, 80), role: role(body?.role), aliases: clean(body?.aliases, 200) }];
+      const existing = new Set((await env.DB.prepare("SELECT full_name FROM staff WHERE rooftop_key = ?").bind(rooftop).all<{ full_name: string }>()).results.map((s) => norm(s.full_name)));
+      const fresh = people.filter((p) => p.full_name && !existing.has(norm(p.full_name)));
+      if (!fresh.length) return fail(people.length ? "Everyone listed is already on this store's roster." : "Enter a name.");
+      await env.DB.batch(fresh.map((p) => env.DB.prepare("INSERT INTO staff (rooftop_key, full_name, role, aliases, created_at) VALUES (?,?,?,?,?)")
+        .bind(rooftop, p.full_name, p.role, p.aliases, nowIso())));
+      const changed = await rematch(env, rooftop);
+      await logEvent(env, null, user.email, "staff_added", `${fresh.length} at ${rooftop}`);
+      return json({ ok: true, added: fresh.length, skipped: people.length - fresh.length, rematched: changed });
+    }
+    if (op === "update" || op === "delete") {
+      const s = await findStaff(Number(body?.id));
+      if (!s) return fail("Staff member not found.", 404);
+      if (op === "update") {
+        await env.DB.prepare("UPDATE staff SET full_name = ?, role = ?, aliases = ?, active = ? WHERE id = ?")
+          .bind(clean(body?.full_name, 80) || s.full_name, role(body?.role ?? s.role), clean(body?.aliases ?? s.aliases, 200), body?.active === false ? 0 : 1, s.id).run();
+      } else {
+        const used = await env.DB.prepare("SELECT 1 AS x FROM mentions WHERE staff_id = ? LIMIT 1").bind(s.id).first();
+        if (used) await env.DB.prepare("UPDATE staff SET active = 0 WHERE id = ?").bind(s.id).run(); // keep their history
+        else await env.DB.prepare("DELETE FROM staff WHERE id = ?").bind(s.id).run();
+      }
+      return json({ ok: true, rematched: await rematch(env, s.rooftop_key) });
+    }
+    return fail("Unknown roster action.");
+  }
+
+  // Tag a mention: pick the person, mark "not an employee", add a missed name, or remove a manual tag
+  if (path === "/api/staff/tag" && req.method === "POST") {
+    const op = String(body?.op || "");
+    if (op === "add") {
+      const r = await getReview(env, String(body?.review_id || ""));
+      const s = await env.DB.prepare("SELECT * FROM staff WHERE id = ?").bind(Number(body?.staff_id)).first<Staff>();
+      if (!r || !canSee(user, r.rooftop_key)) return fail("Review not found.", 404);
+      if (!s || s.rooftop_key !== r.rooftop_key) return fail("Pick someone from this store's roster.");
+      await env.DB.prepare(`INSERT INTO mentions (review_id, rooftop_key, review_time, stars, name_raw, role_hint, sentiment, staff_id, match, tagged_by, tagged_at)
+        VALUES (?,?,?,?,?,?,?,?, 'manual', ?, ?)`).bind(r.id, r.rooftop_key, r.create_time, r.stars, s.full_name, s.role, "neutral", s.id, user.email, nowIso()).run();
+      await logEvent(env, r.id, user.email, "staff_tagged", `Added ${s.full_name}`);
+      return json({ ok: true });
+    }
+    const m = await env.DB.prepare("SELECT * FROM mentions WHERE id = ?").bind(Number(body?.mention_id)).first<any>();
+    if (!m || !canSee(user, m.rooftop_key)) return fail("Tag not found.", 404);
+    if (op === "assign") {
+      const s = await env.DB.prepare("SELECT * FROM staff WHERE id = ?").bind(Number(body?.staff_id)).first<Staff>();
+      if (!s || s.rooftop_key !== m.rooftop_key) return fail("Pick someone from this store's roster.");
+      await env.DB.prepare("UPDATE mentions SET staff_id = ?, match = 'manual', tagged_by = ?, tagged_at = ? WHERE id = ?").bind(s.id, user.email, nowIso(), m.id).run();
+      await logEvent(env, m.review_id, user.email, "staff_tagged", `"${m.name_raw}" is ${s.full_name}`);
+    } else if (op === "ignore") {
+      await env.DB.prepare("UPDATE mentions SET staff_id = NULL, match = 'ignored', tagged_by = ?, tagged_at = ? WHERE id = ?").bind(user.email, nowIso(), m.id).run();
+      await logEvent(env, m.review_id, user.email, "staff_tagged", `"${m.name_raw}" is not an employee`);
+    } else if (op === "remove") {
+      await env.DB.prepare("DELETE FROM mentions WHERE id = ?").bind(m.id).run();
+      await logEvent(env, m.review_id, user.email, "staff_tagged", `Removed ${m.name_raw}`);
+    } else return fail("Unknown tag action.");
+    return json({ ok: true });
+  }
+
   return fail("Not found.", 404);
 }
