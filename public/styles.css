@@ -130,6 +130,23 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .btn[disabled] { opacity: .55; cursor: wait; }
 .close { border: 0; background: none; font-size: 26px; line-height: 1; cursor: pointer; color: var(--muted); padding: 2px 6px; }
 
+/* Stand-alone review page (opened from an email by someone without dashboard access) */
+body.link-mode .rail, body.link-mode .main { display: none; }
+body.link-mode .shell, body.link-mode .shell.with-detail { display: block; }
+body.link-mode .detail { position: static; max-width: 760px; margin: 24px auto; border: 1px solid var(--line); border-radius: var(--radius-m); max-height: none; box-shadow: none; width: auto; animation: none; }
+@media (max-width: 760px) { body.link-mode .detail { margin: 0; border-radius: 0; border-width: 0 0 1px; } }
+
+.esc-details { background: var(--paper); border-radius: var(--radius-s); padding: 10px 14px; margin: 10px 0; }
+.esc-details .lbl { font-weight: 700; margin: 0 0 6px; }
+.esc-details dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; margin: 0 0 8px; font-size: 15px; }
+.esc-details dt { color: var(--muted); }
+.esc-details dd { margin: 0; font-weight: 500; }
+.esc-details .last-note { background: var(--panel); margin: 8px 0 0; }
+.sent-list { list-style: none; padding: 0; margin: 8px 0; font-size: 14px; }
+.sent-list li { padding: 5px 0; border-bottom: 1px solid var(--line); }
+.sent-list li:last-child { border-bottom: 0; }
+.sent-list .meta { display: block; margin: 0; }
+
 /* Escalation */
 .tab-count:not(:empty) { display: inline-block; min-width: 20px; padding: 0 6px; margin-left: 4px; border-radius: 999px; background: var(--red); color: #fff; font-size: 12.5px; line-height: 20px; text-align: center; }
 .row-wrap.has-quick.has-resolve .row { padding-right: 150px; }
@@ -169,6 +186,27 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .add-row input { flex: 1; }
 .email-preview { width: 100%; height: 520px; border: 1px solid var(--line); border-radius: var(--radius-s); background: #fff; margin: 8px 0 4px; }
 .team-edit { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 14px; }
+
+/* Staff */
+.staff-list { list-style: none; padding: 0; margin: 4px 0; font-size: 15px; }
+.staff-list li { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px 10px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.staff-list li:last-child { border-bottom: 0; }
+.tag-ctl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tag-ctl select, #addStaff, #staffFilters select, .roster-add select, #rosterStore, #rosterPanel td input, #rosterPanel td select {
+  border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius-s); padding: 6px 8px; font-size: 14px; }
+#staffFilters label { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 14px; }
+.panel.cov { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; }
+.panel-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 4px; }
+.panel-head h3 { margin: 0; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--paper); }
+.tag-queue { list-style: none; padding: 0; margin: 14px 0 0; }
+.tag-queue li { border-top: 1px solid var(--line); padding: 12px 0; display: grid; gap: 8px; }
+.excerpt-full { margin: 4px 0 0; font-size: 14px; color: var(--muted); }
+#rosterPanel td input { width: 100%; min-width: 140px; }
+.roster-add { display: grid; gap: 4px; margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.roster-add .btn { justify-self: start; }
+.roster-add textarea { border: 1px solid var(--line); border-radius: var(--radius-s); padding: 8px 10px; font-weight: 400; width: 100%; background: var(--panel); }
 
 /* Statistics */
 .kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--panel); margin-bottom: 22px; }

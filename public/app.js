@@ -30,7 +30,7 @@ async function api(path, opts = {}) {
   const data = await res.json().catch(() => ({ error: `The server returned an unexpected response (${res.status}).` }));
   if (res.status === 401) {
     // Session expired: send them back through Microsoft sign-in, then return here
-    location.href = `/auth/login?returnTo=${encodeURIComponent(location.pathname)}`;
+    location.href = `/auth/login?returnTo=${encodeURIComponent(location.pathname + location.search)}`;
     throw new Error("Signing you in again\u2026");
   }
   if (!res.ok) { const e = new Error(data.error || `Request failed (${res.status})`); e.status = res.status; e.data = data; throw e; }
@@ -73,7 +73,7 @@ function pill(status, isSample) {
 }
 
 function storeName(key) {
-  return state.me.rooftops.find((r) => r.key === key)?.name || key;
+  return state.me.rooftops.find((r) => r.key === key)?.name || (state.me.storeNames || {})[key] || key;
 }
 const shortName = (key) => storeName(key).replace(/^Lester Glenn /, "");
 
@@ -88,6 +88,7 @@ async function boot() {
   }
   const m = state.me;
   $("#who").textContent = m.email;
+  if (m.role === "link") return bootLinkOnly();
   const chip = $("#modeChip");
   chip.hidden = false;
   chip.textContent = { dry_run: "Dry run", shadow: "Shadow mode", live: "Live" }[m.mode];
@@ -107,6 +108,17 @@ async function boot() {
   setView("inbox");
   const linked = new URLSearchParams(location.search).get("review");
   if (linked) { openDetail(linked); history.replaceState(null, "", "/"); }
+}
+
+function bootLinkOnly() {
+  document.body.classList.add("link-mode");
+  const id = new URLSearchParams(location.search).get("review");
+  if (!id) {
+    document.querySelector(".shell").innerHTML = `<div class="gate"><h1>Lester Glenn Reviews</h1>
+      <p>You can open reviews from the escalation emails sent to you. If you need access to the full dashboard, ask an admin.</p></div>`;
+    return;
+  }
+  openDetail(id);
 }
 
 function renderRail() {
@@ -140,6 +152,7 @@ function setView(view) {
   state.page = 0;
   document.querySelectorAll("#tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
   if (view === "stats") return renderStats();
+  if (view === "staff") return renderStaff();
   if (view === "settings") return renderSettings();
   loadList();
 }
@@ -224,9 +237,9 @@ function renderList(more) {
 function rowHtml(r) {
   const text = r.text ? esc(r.text) : "Rating only, no written review";
   const escView = state.view === "escalations";
-  const resolveBtn = escView && state.me.role !== "viewer"
+  const resolveBtn = escView && (state.me.role === "admin" || state.me.role === "manager")
     ? `<button class="esc-resolve" data-resolve="${esc(r.id)}" title="The team responded: remove from Escalations">Resolved</button>` : "";
-  const quick = state.me.role !== "viewer"
+  const quick = (state.me.role === "admin" || state.me.role === "manager")
     ? `<button class="esc-quick" data-esc="${esc(r.id)}" aria-label="Escalate this review" title="${r.escalation_open ? "Follow up with the team" : "Escalate"}">!</button>` : "";
   const followups = (r.escalation_open || 0) - 1;
   const when = escView
@@ -271,7 +284,9 @@ window.closeDetail = closeDetail;
 function renderDetail(data) {
   state.detail = data;
   const { review: r, events, escalation } = data;
-  const canAct = state.me.role !== "viewer";
+  const canAct = state.me.role === "admin" || state.me.role === "manager"; // escalate and resolve
+  const canReply = !!state.me.canReply;                                    // approve, edit, redraft, dismiss
+  const linkOnly = state.me.role === "link";
   const answered = ANSWERED.includes(r.status);
   const live = state.me.mode === "live";
   let flags = [];
@@ -283,23 +298,25 @@ function renderDetail(data) {
       <p class="meta">${r.reply_time ? "Replied " + ago(r.reply_time) : ""}</p>`;
   } else if (r.status === "dismissed") {
     replyBlock = `<p class="reason">Dismissed${r.decided_by ? " by <b>" + esc(r.decided_by) + "</b>" : ""}. No reply will be posted from here.</p>
-      ${canAct ? `<div class="actions"><button class="btn" data-act="reopen">Move back to inbox</button></div>` : ""}`;
+      ${canReply ? `<div class="actions"><button class="btn" data-act="reopen">Move back to inbox</button></div>` : ""}`;
   } else if (!r.draft && (r.status === "new" || r.status === "old_unanswered")) {
     replyBlock = `<p class="reason">${r.status === "new" ? "A draft will be written on the next agent run." : "This review is older than the drafting window, so no draft was written."}</p>
-      ${canAct ? `<div class="actions"><button class="btn primary" data-act="redraft">Write a draft now</button></div>` : ""}`;
+      ${canReply ? `<div class="actions"><button class="btn primary" data-act="redraft">Write a draft now</button></div>` : ""}`;
   } else {
     const approveLabel = live && !r.is_sample ? "Approve and post" : "Approve";
     replyBlock = `<label class="lbl" for="replyText">Reply</label>
-      <textarea id="replyText" ${canAct ? "" : "readonly"}>${esc(r.draft || "")}</textarea>
-      ${canAct ? `<div class="actions">
+      <textarea id="replyText" ${canReply ? "" : "readonly"}>${esc(r.draft || "")}</textarea>
+      ${!canReply ? `<p class="meta">Only ${esc(approverNames())} can approve or change replies.</p>` : ""}
+      ${canReply ? `<div class="actions">
         <button class="btn primary" data-act="approve">${approveLabel}</button>
         <button class="btn" data-act="save">Save edits</button>
         <button class="btn" data-act="redraft">Redraft</button>
         <button class="btn quiet danger" data-act="dismiss">Dismiss</button>
       </div>` : ""}
-      ${!live ? `<p class="meta">The agent isn't live yet, so approved replies are saved and will post once it goes live.</p>` : ""}`;
+      ${!live && canReply ? `<p class="meta">The agent isn't live yet, so approved replies are saved and will post once it goes live.</p>` : ""}`;
   }
 
+  if (linkOnly && !answered) replyBlock = "";
   const reason = r.route_reason
     ? `<p class="reason"><b>Why it's here:</b> ${esc(r.route_reason)}${flags.length && !r.route_reason.includes(flags[0]) ? ". " + esc(flags.join(", ")) : ""}</p>` : "";
 
@@ -308,27 +325,29 @@ function renderDetail(data) {
       <div><h2>${esc(storeName(r.rooftop_key))}</h2><p class="meta">${new Date(r.create_time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</p></div>
       <div class="head-actions">
         ${canAct && escalation && escalation.ready && escalation.teams ? `<button class="btn escalate" id="escalateBtn">${r.escalation_open ? "Follow up" : "Escalate"}</button>` : ""}
-        <button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button>
+        ${linkOnly ? "" : `<button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button>`}
       </div>
     </div>
     <div>${stars(r.stars, "big-stars")}</div>
-    <div>${pill(r.status, r.is_sample)}</div>
+    ${linkOnly ? "" : `<div>${pill(r.status, r.is_sample)}</div>`}
     <blockquote>${r.text ? esc(r.text) : "<em>Rating only, no written review</em>"}</blockquote>
     ${reason}
     ${replyBlock}
     ${escalationBlock(r, escalation, canAct)}
+    ${linkOnly ? "" : staffBlock(data.staff)}
     <div class="history"><h3>History</h3>
       ${events.length ? `<ol>${events.map((e) => `<li><b>${esc(eventLabel(e.action))}</b> by ${esc(e.actor)}, ${ago(e.at)}${e.detail ? ". " + esc(e.detail) : ""}</li>`).join("")}</ol>` : `<p class="meta">No actions yet.</p>`}
     </div>`;
 
   $("#detail").querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => act(r.id, b.dataset.act, b)));
+  bindStaffBlock(r, data.staff);
   const escBtn = $("#escalateBtn");
   if (escBtn) escBtn.onclick = () => renderEscalate(state.detail);
 }
 
 function eventLabel(a) {
   return { drafted: "Drafted", edited: "Edited", approved: "Approved", posted: "Posted", dismissed: "Dismissed", reopened: "Reopened",
-    escalated: "Emailed the team", escalation_resolved: "Marked resolved" }[a] || a;
+    escalated: "Emailed the team", escalation_resolved: "Marked resolved", staff_tagged: "Staff tag" }[a] || a;
 }
 
 async function act(id, action, btn) {
@@ -376,6 +395,32 @@ async function resolveFromList(id, btn) {
   } catch (err) { toast(err.message, true); btn.disabled = false; }
 }
 
+function approverNames() {
+  const a = (state.me.approvers || []).map((x) => x.split("@")[0]);
+  return a.length ? a.join(" and ") : "the reply approvers";
+}
+
+const DETAIL_LABELS = { dms: "Client / DMS #", client: "Client name", salesperson: "Salesperson", deal: "Deal #", dealDate: "Deal date",
+  ro: "RO #", roDate: "RO date", advisor: "Service advisor" };
+
+function lastEscalationHtml(e) {
+  const last = e && e.last;
+  if (!last) return "";
+  const fields = Object.entries(last.fields || {});
+  return `<div class="esc-details">
+    <p class="lbl">${esc((e.labels && e.labels[last.concern]) || "Concern")}</p>
+    ${fields.length ? `<p class="meta" style="margin:0 0 4px">We believe the customer that left the review is:</p>
+      <dl>${fields.map(([k, v]) => `<dt>${esc(DETAIL_LABELS[k] || k)}</dt><dd>${esc(/Date$/.test(k) && /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(v + "T12:00:00Z").toLocaleDateString(undefined, { timeZone: "UTC", dateStyle: "medium" }) : v)}</dd>`).join("")}</dl>` : ""}
+    ${last.note ? `<div class="last-note"><span>Last note sent</span>${esc(last.note)}</div>` : ""}
+  </div>`;
+}
+
+function sentListHtml(e) {
+  if (!e || !e.sent || !e.sent.length) return "";
+  return `<ol class="sent-list">${e.sent.map((x) => `<li><b>${esc((e.labels && e.labels[x.concern]) || x.concern)}</b> by ${esc(x.sent_by)}, ${ago(x.sent_at)}
+    <span class="meta">to ${esc(x.recipients.split(",").join(", "))}</span></li>`).join("")}</ol>`;
+}
+
 function escalationBlock(r, e, canAct) {
   if (!e || !e.ready) return "";
   const count = r.escalation_count || 0, open = r.escalation_open || 0;
@@ -384,7 +429,7 @@ function escalationBlock(r, e, canAct) {
        ${open > 1 ? `<b>${open - 1} follow-up${open - 1 === 1 ? "" : "s"} without resolution.</b>` : open === 1 ? "Waiting on the team." : "Resolved."}</p>` : "";
   const buttons = canAct && open ? `<div class="actions"><button class="btn quiet" data-act="resolve">Mark resolved</button></div>` : "";
   if (!summary && !buttons) return "";
-  return `<div class="esc-block"><h3>Escalation</h3>${summary}${buttons}</div>`;
+  return `<div class="esc-block"><h3>Escalation</h3>${summary}${lastEscalationHtml(e)}${sentListHtml(e)}${buttons}</div>`;
 }
 
 const FIELD_INPUTS = {
@@ -509,6 +554,240 @@ function renderEscalate(data) {
   };
 
   draw();
+}
+
+/* ---------- Staff mentioned (review panel) ---------- */
+
+const ROLE_LABEL = { sales: "Sales", service: "Service", other: "Other" };
+
+function staffBlock(st) {
+  if (!st) return "";
+  const rosterOpts = (selected) => st.roster.filter((p) => p.active).map((p) =>
+    `<option value="${p.id}" ${p.id === selected ? "selected" : ""}>${esc(p.full_name)} (${ROLE_LABEL[p.role]})</option>`).join("");
+  const items = st.mentions.filter((m) => m.match !== "ignored").map((m) => {
+    const who = m.staff_id ? `<b>${esc(m.full_name)}</b>` : m.match === "ambiguous" ? `<span class="late">more than one match</span>` : `<span class="late">not on the roster</span>`;
+    const said = m.match === "manual" && m.full_name === m.name_raw ? "Tagged" : `"${esc(m.name_raw)}"`;
+    const how = m.match === "manual" ? "tagged by hand" : m.match === "auto" ? "matched automatically" : "";
+    return `<li><span>${said} \u2192 ${who}${how ? ` <span class="meta">${how}</span>` : ""}</span>
+      ${st.canTag ? `<span class="tag-ctl"><select data-assign="${m.id}" aria-label="Who is ${esc(m.name_raw)}?"><option value="">${m.staff_id ? "Change person\u2026" : "Pick the person\u2026"}</option>${rosterOpts(m.staff_id)}</select>
+        ${m.match === "manual" ? `<button class="btn quiet" data-untag="${m.id}">Remove</button>` : `<button class="btn quiet" data-ignore="${m.id}">Not an employee</button>`}</span>` : ""}</li>`;
+  }).join("");
+  const body = !st.scanned && !st.mentions.length ? `<p class="meta">Not read for staff names yet. It happens on the next agent run, or from the Staff tab.</p>`
+    : items ? `<ul class="staff-list">${items}</ul>` : `<p class="meta">No employees named in this review.</p>`;
+  const add = st.canTag && st.roster.length ? `<div class="add-row" style="margin-top:8px"><select id="addStaff"><option value="">Tag someone Claude missed\u2026</option>${rosterOpts(null)}</select></div>` : "";
+  return `<div class="esc-block"><h3>Staff mentioned</h3>${body}${add}</div>`;
+}
+
+function bindStaffBlock(r, st) {
+  if (!st || !st.canTag) return;
+  const call = async (body, msg) => {
+    try { await api("/api/staff/tag", { method: "POST", body }); toast(msg); openDetail(r.id); }
+    catch (err) { toast(err.message, true); }
+  };
+  $("#detail").querySelectorAll("[data-assign]").forEach((sel) => (sel.onchange = () => sel.value && call({ op: "assign", mention_id: +sel.dataset.assign, staff_id: +sel.value }, "Tagged")));
+  $("#detail").querySelectorAll("[data-ignore]").forEach((b) => (b.onclick = () => call({ op: "ignore", mention_id: +b.dataset.ignore }, "Marked as not an employee")));
+  $("#detail").querySelectorAll("[data-untag]").forEach((b) => (b.onclick = () => call({ op: "remove", mention_id: +b.dataset.untag }, "Tag removed")));
+  const add = $("#addStaff");
+  if (add) add.onchange = () => add.value && call({ op: "add", review_id: r.id, staff_id: +add.value }, "Tagged");
+}
+
+/* ---------- Staff tab ---------- */
+
+function monthOptions(selected) {
+  const out = [];
+  const d = new Date();
+  d.setDate(1);
+  for (let i = 0; i < 36; i++) {
+    const v = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    out.push(`<option value="${v}" ${v === selected ? "selected" : ""}>${d.toLocaleDateString(undefined, { month: "short", year: "numeric" })}</option>`);
+    d.setMonth(d.getMonth() - 1);
+  }
+  return out.join("");
+}
+
+function thisMonth() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; }
+
+async function renderStaff() {
+  closeDetail();
+  const v = $("#view");
+  const f = state.staffFilter || (state.staffFilter = { from: thisMonth(), to: thisMonth(), role: "" });
+  const controls = `<div class="filters" id="staffFilters">
+      <label>From <select id="sFrom">${monthOptions(f.from)}</select></label>
+      <label>To <select id="sTo">${monthOptions(f.to)}</select></label>
+      <label class="sr" for="sRole">Role</label>
+      <select id="sRole"><option value="">Sales and service</option><option value="sales" ${f.role === "sales" ? "selected" : ""}>Sales</option>
+        <option value="service" ${f.role === "service" ? "selected" : ""}>Service</option><option value="other" ${f.role === "other" ? "selected" : ""}>Other</option></select>
+    </div>`;
+  v.innerHTML = controls + `<div class="empty-state">Counting\u2026</div>`;
+  const bind = () => {
+    const apply = () => { f.from = $("#sFrom").value; f.to = $("#sTo").value; f.role = $("#sRole").value; if (f.from > f.to) f.to = f.from; renderStaff(); };
+    ["#sFrom", "#sTo", "#sRole"].forEach((id) => ($(id).onchange = apply));
+  };
+  bind();
+  const q = new URLSearchParams({ from: f.from, to: f.to });
+  if (f.role) q.set("role", f.role);
+  if (state.rooftop) q.set("rooftop", state.rooftop);
+  let t, roster;
+  try { [t, roster] = await Promise.all([api(`/api/staff/tally?${q}`), api(`/api/staff/roster${state.rooftop ? "?rooftop=" + state.rooftop : ""}`)]); }
+  catch (err) { v.innerHTML = controls + `<div class="empty-state"><strong>Staff counts didn't load</strong>${esc(err.message)}</div>`; bind(); return; }
+  if (!t.ready) {
+    v.innerHTML = `<div class="empty-state"><strong>One-time setup needed</strong>Run the SQL in <code>migrations/0006_staff_mentions.sql</code> in the D1 console, then reload.</div>`;
+    return;
+  }
+  const label = f.from === f.to ? new Date(f.from + "-02").toLocaleDateString(undefined, { month: "long", year: "numeric" })
+    : `${new Date(f.from + "-02").toLocaleDateString(undefined, { month: "short", year: "numeric" })} to ${new Date(f.to + "-02").toLocaleDateString(undefined, { month: "short", year: "numeric" })}`;
+  const cov = t.coverage || { total: 0, scanned: 0 };
+  const unread = (cov.total || 0) - (cov.scanned || 0);
+  const coverage = `<div class="panel cov"><div><b>${cov.scanned || 0}</b> of <b>${cov.total || 0}</b> reviews from ${esc(label)} have been read for staff names.
+      ${unread > 0 ? `<span class="late">${unread} not read yet, so counts may be low.</span>` : ""}</div>
+      ${t.canTag && unread > 0 ? `<button class="btn primary" id="scanBtn">Read ${unread} reviews now</button>` : ""}</div>`;
+
+  const rows = t.people.map((p) => `<tr data-person="${p.id}" class="clickable">
+      <td><b>${esc(p.full_name)}</b>${p.active ? "" : ` <span class="meta">(inactive)</span>`}</td>
+      <td>${esc(storeName(p.rooftop_key).replace(/^Lester Glenn /, ""))}</td><td>${ROLE_LABEL[p.role]}</td>
+      <td class="num"><b>${p.reviews}</b></td><td class="num">${p.positive}</td><td class="num">${p.neutral}</td><td class="num ${p.negative ? "late" : ""}">${p.negative}</td>
+      <td class="num">${p.avg_stars ?? "\u2013"}</td></tr>`).join("");
+  const tally = `<div class="panel"><div class="panel-head"><h3>Reviews per person, ${esc(label)}</h3>
+      ${t.people.length ? `<button class="btn" id="csvBtn">Download CSV</button>` : ""}</div>
+    <p class="note">Each review counts once per person it names. Click a name to see the reviews.</p>
+    ${t.people.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Store</th><th>Role</th><th class="num">Reviews</th>
+      <th class="num">4\u20135 \u2605</th><th class="num">3 \u2605</th><th class="num">1\u20132 \u2605</th><th class="num">Avg</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<p class="meta">Nobody tallied yet for this range.${roster.staff.length ? "" : " Add each store's staff below so names can be matched."}</p>`}
+    <div id="drill"></div></div>`;
+
+  const untaggedCount = t.unassigned.reduce((a, u) => a + u.reviews, 0);
+  const untagged = t.unassigned.length ? `<div class="panel"><h3>Needs tagging <span class="tab-count">${untaggedCount}</span></h3>
+      <p class="note">Names Claude found that don't match exactly one person on that store's roster. These aren't counted until they're tagged.</p>
+      <div class="table-wrap"><table><thead><tr><th>Name in reviews</th><th>Store</th><th>Why</th><th class="num">Reviews</th></tr></thead><tbody>
+      ${t.unassigned.map((u) => `<tr><td>"${esc(u.name)}"</td><td>${esc(storeName(u.rooftop_key).replace(/^Lester Glenn /, ""))}</td>
+        <td>${u.match === "ambiguous" ? "More than one person matches" : "Not on the roster"}</td><td class="num">${u.reviews}</td></tr>`).join("")}</tbody></table></div>
+      ${t.canTag ? `<button class="btn primary" id="tagBtn" style="margin-top:12px">Tag these now</button><div id="tagList"></div>` : ""}</div>` : "";
+
+  v.innerHTML = controls + coverage + tally + untagged + (t.canTag ? rosterPanel(roster.staff) : "");
+  bind();
+  if ($("#scanBtn")) $("#scanBtn").onclick = (e) => scanMonths(f, e.target);
+  if ($("#csvBtn")) $("#csvBtn").onclick = () => downloadCsv(t.people, label);
+  v.querySelectorAll("tr[data-person]").forEach((tr) => (tr.onclick = () => drillPerson(t.people.find((p) => p.id === +tr.dataset.person), f)));
+  if ($("#tagBtn")) $("#tagBtn").onclick = () => renderTagList(f, roster.staff);
+  if (t.canTag) bindRoster(roster.staff);
+}
+
+async function scanMonths(f, btn) {
+  btn.disabled = true;
+  let total = 0;
+  try {
+    for (let i = 0; i < 100; i++) {
+      const r = await api("/api/staff/scan", { method: "POST", body: { from: f.from, to: f.to } });
+      total += r.scanned;
+      btn.textContent = `Reading\u2026 ${total} done, ${r.remaining} to go`;
+      if (!r.remaining || !r.scanned) break;
+    }
+    toast(`Read ${total} reviews`);
+  } catch (err) { toast(err.message, true); }
+  renderStaff();
+}
+
+function downloadCsv(people, label) {
+  const cell = (x) => `"${String(x ?? "").replace(/"/g, '""')}"`;
+  const lines = [["Name", "Store", "Role", "Reviews", "4-5 stars", "3 stars", "1-2 stars", "Average stars"].map(cell).join(",")]
+    .concat(people.map((p) => [p.full_name, storeName(p.rooftop_key), ROLE_LABEL[p.role], p.reviews, p.positive, p.neutral, p.negative, p.avg_stars].map(cell).join(",")));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lines.join("\r\n")], { type: "text/csv" }));
+  a.download = `staff-reviews-${label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.csv`;
+  a.click();
+}
+
+async function drillPerson(p, f) {
+  const box = $("#drill");
+  box.innerHTML = `<p class="meta">Loading reviews for ${esc(p.full_name)}\u2026</p>`;
+  try {
+    const d = await api(`/api/reviews?view=all&staff=${p.id}&from=${f.from}&to=${f.to}`);
+    const prevView = state.view; state.view = "all";
+    box.innerHTML = `<h3 style="margin:18px 0 8px">Reviews naming ${esc(p.full_name)}</h3><div class="list">${d.reviews.map(rowHtml).join("")}</div>`;
+    state.view = prevView;
+    state.rows = d.reviews;
+    box.querySelector(".list").onclick = (e) => {
+      const q = e.target.closest("[data-esc]"); if (q) return openDetail(q.dataset.esc, true);
+      const b = e.target.closest(".row"); if (b) openDetail(b.dataset.id);
+    };
+    box.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (err) { box.innerHTML = `<p class="late">${esc(err.message)}</p>`; }
+}
+
+async function renderTagList(f, staff) {
+  const box = $("#tagList");
+  box.innerHTML = `<p class="meta">Loading\u2026</p>`;
+  const q = new URLSearchParams({ from: f.from, to: f.to });
+  if (state.rooftop) q.set("rooftop", state.rooftop);
+  const d = await api(`/api/staff/untagged?${q}`);
+  const first = (n) => (n || "").toLowerCase().split(/\s+/)[0];
+  box.innerHTML = `<ul class="tag-queue">${d.mentions.map((m) => {
+    const pool = staff.filter((s) => s.rooftop_key === m.rooftop_key && s.active);
+    pool.sort((a, b) => (first(b.full_name) === first(m.name_raw)) - (first(a.full_name) === first(m.name_raw)) || a.full_name.localeCompare(b.full_name));
+    return `<li data-mention="${m.id}"><div><b>"${esc(m.name_raw)}"</b> <span class="meta">${esc(storeName(m.rooftop_key).replace(/^Lester Glenn /, ""))}, ${m.stars || "no"} \u2605, ${ago(m.review_time)}</span>
+      <p class="excerpt-full">${esc(m.text || "")}</p></div>
+      <div class="tag-ctl"><select data-assign="${m.id}"><option value="">Who is this?</option>${pool.map((s) => `<option value="${s.id}">${esc(s.full_name)} (${ROLE_LABEL[s.role]})</option>`).join("")}</select>
+      <button class="btn quiet" data-ignore="${m.id}">Not an employee</button><button class="btn quiet" data-open="${esc(m.review_id)}">Open review</button></div></li>`;
+  }).join("")}</ul>`;
+  const done = (li, msg) => { li.remove(); toast(msg); };
+  box.querySelectorAll("[data-assign]").forEach((sel) => (sel.onchange = async () => {
+    if (!sel.value) return;
+    try { await api("/api/staff/tag", { method: "POST", body: { op: "assign", mention_id: +sel.dataset.assign, staff_id: +sel.value } }); done(sel.closest("li"), "Tagged"); }
+    catch (err) { toast(err.message, true); }
+  }));
+  box.querySelectorAll("[data-ignore]").forEach((b) => (b.onclick = async () => {
+    try { await api("/api/staff/tag", { method: "POST", body: { op: "ignore", mention_id: +b.dataset.ignore } }); done(b.closest("li"), "Marked as not an employee"); }
+    catch (err) { toast(err.message, true); }
+  }));
+  box.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => openDetail(b.dataset.open)));
+}
+
+function rosterPanel(staff) {
+  const stores = state.me.rooftops.filter((r) => r.key !== "other");
+  const key = state.rooftop || state.rosterStore || (stores[0] && stores[0].key);
+  state.rosterStore = key;
+  const list = staff.filter((s) => s.rooftop_key === key);
+  return `<div class="panel" id="rosterPanel"><h3>Staff roster</h3>
+    <p class="note">Names in reviews are matched against each store's roster. Add nicknames (Mike for Michael) so they match. People who leave can be set inactive; their past counts stay.</p>
+    <label class="field" style="max-width:360px">Store<select id="rosterStore">${stores.map((r) => `<option value="${esc(r.key)}" ${r.key === key ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select></label>
+    ${list.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Role</th><th>Nicknames</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map((s) => `<tr data-staff="${s.id}"><td><input data-k="full_name" value="${esc(s.full_name)}"></td>
+        <td><select data-k="role">${["sales", "service", "other"].map((r) => `<option value="${r}" ${s.role === r ? "selected" : ""}>${ROLE_LABEL[r]}</option>`).join("")}</select></td>
+        <td><input data-k="aliases" value="${esc(s.aliases)}" placeholder="Mike, Mikey"></td>
+        <td><select data-k="active"><option value="1" ${s.active ? "selected" : ""}>Active</option><option value="0" ${s.active ? "" : "selected"}>Inactive</option></select></td>
+        <td class="num"><button class="btn quiet" data-save-staff>Save</button><button class="btn quiet danger" data-del-staff>Remove</button></td></tr>`).join("")}
+      </tbody></table></div>` : `<p class="meta">No staff on this store's roster yet.</p>`}
+    <div class="roster-add">
+      <label class="field">Add people, one per line ("Full Name" or "Full Name, nickname, nickname")
+        <textarea id="rosterText" rows="4" placeholder="Michael Smith, Mike&#10;Kaitlyn Jones, Katie"></textarea></label>
+      <label class="field" style="max-width:220px">Role for these people<select id="rosterRole"><option value="sales">Sales</option><option value="service">Service</option><option value="other">Other</option></select></label>
+      <button class="btn primary" id="rosterAdd">Add to roster</button>
+    </div></div>`;
+}
+
+function bindRoster() {
+  $("#rosterStore").onchange = (e) => { state.rosterStore = e.target.value; renderStaff(); };
+  $("#rosterAdd").onclick = async (e) => {
+    e.target.disabled = true;
+    try {
+      const r = await api("/api/staff/roster", { method: "POST", body: { op: "bulk", rooftop: state.rosterStore, text: $("#rosterText").value, role: $("#rosterRole").value } });
+      toast(`Added ${r.added}${r.skipped ? `, ${r.skipped} already listed` : ""}. ${r.rematched} review tags updated.`);
+      renderStaff();
+    } catch (err) { toast(err.message, true); e.target.disabled = false; }
+  };
+  document.querySelectorAll("[data-save-staff]").forEach((b) => (b.onclick = async () => {
+    const tr = b.closest("tr"), val = (k) => tr.querySelector(`[data-k="${k}"]`).value;
+    try {
+      const r = await api("/api/staff/roster", { method: "POST", body: { op: "update", id: +tr.dataset.staff, full_name: val("full_name"), role: val("role"), aliases: val("aliases"), active: val("active") === "1" } });
+      toast(`Saved. ${r.rematched} review tags updated.`); renderStaff();
+    } catch (err) { toast(err.message, true); }
+  }));
+  document.querySelectorAll("[data-del-staff]").forEach((b) => (b.onclick = async () => {
+    const tr = b.closest("tr");
+    if (!confirm("Remove this person? If they've been tagged on reviews, they're set inactive instead so their counts are kept.")) return;
+    try { await api("/api/staff/roster", { method: "POST", body: { op: "delete", id: +tr.dataset.staff } }); toast("Removed"); renderStaff(); }
+    catch (err) { toast(err.message, true); }
+  }));
 }
 
 /* ---------- Statistics ---------- */
