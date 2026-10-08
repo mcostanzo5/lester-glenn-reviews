@@ -26,11 +26,15 @@ crons = ["0 0,1,12,13,16,17,20,21 * * *"]
 [vars]
 # dry_run: sample data only | shadow: reads Google, never posts | live: posts replies
 AGENT_MODE = "dry_run"
-# Microsoft 365 sign-in, from the Entra app registration (see README)
+# Microsoft 365 sign-in, from the Entra app registration
 MS_TENANT_ID = "cebd3ada-40a6-4d78-b4ca-02472b1b7d7b"
 MS_CLIENT_ID = "ffed32c7-e735-4e6f-9ab9-97b89a2c5e32"
+# Only these domains can receive escalation emails
+MAIL_ALLOWED_DOMAINS = "lesterglenn.com"
 # Always admins, even before anyone is added in Settings
 ADMIN_EMAILS = "mcostanzo@lesterglenn.com"
+# Only these people can approve, edit, redraft or dismiss replies
+REPLY_APPROVERS = "mcostanzo@lesterglenn.com,mbellina@lesterglenn.com"
 MAX_AGE_DAYS = "14"
 MAX_DRAFTS_PER_RUN = "25"
 AUTO_POST_MIN_STARS = "4"
@@ -38,7 +42,6 @@ CLAUDE_MODEL = "claude-sonnet-5"
 # Hours (24h, Eastern) when scheduled runs happen
 RUN_HOURS_ET = "8,12,16,20"
 # Max Google + Claude calls per run. Free plan limit is 50; keep 45 there.
-# On Workers Paid, raise to 900 so the history import finishes faster.
 EXTERNAL_REQUEST_BUDGET = "45"
 # Pages of older reviews (50 each) imported per run for statistics
 BACKFILL_PAGES_PER_RUN = "20"
