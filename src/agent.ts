@@ -1,11 +1,11 @@
 import type { Env, ReviewRow, Status } from "./types";
 import { ANSWERED, mode, num, nowIso } from "./types";
 import { GBPClient, GBPError, type GReview } from "./gbp";
-import { matchRooftop, rooftopByKey } from "./rooftops";
+import { matchRooftop, rooftopByKey, rooftopFor } from "./rooftops";
 import { draftReply } from "./drafter";
 import { route } from "./router";
 import { Budget, BudgetExhausted, unlimited } from "./budget";
-import { scanReviews } from "./staff";
+import { etDayStart, scanReviews } from "./staff";
 
 const MAX_NEW_PAGES = 5; // only matters if a store gets 250+ new reviews between runs
 
@@ -105,8 +105,23 @@ async function loadLocations(env: Env, client: GBPClient): Promise<Loc[]> {
 }
 
 /** Phase 1: new and edited reviews for every store, newest first. */
+/** Oldest review date worth importing (HISTORY_START, default Jan 1 2024, Eastern time). */
+function historyCutoff(env: Env): string {
+  return etDayStart(env.HISTORY_START || "2024-01-01") || etDayStart("2024-01-01")!;
+}
+
+/** Reviews in a page that are new enough to keep, and whether the page reached past the cutoff.
+ *  Google sorts by last update, newest first, so once one is older than the cutoff, all the rest are too. */
+function withinHistory(reviews: GReview[], cutoff: string) {
+  return {
+    keep: reviews.filter((r) => r.create_time >= cutoff),
+    pastCutoff: reviews.some((r) => r.update_time < cutoff),
+  };
+}
+
 async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget, notes: string[]): Promise<number> {
   const maxAge = num(env.MAX_AGE_DAYS, 14);
+  const cutoff = historyCutoff(env);
   let count = 0;
   for (const loc of locs) {
     if (!budget.has(1)) { notes.push(`Skipped ${loc.title} this run to stay under the request limit.`); continue; }
@@ -118,11 +133,13 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
         const page = await client.reviewPage(loc.account, loc.name, token);
         if (!top && page.reviews[0]) top = page.reviews[0].update_time;
         const fresh = loc.newest_seen ? page.reviews.filter((r) => r.update_time > loc.newest_seen!) : page.reviews;
-        count += await savePage(env, fresh, loc, maxAge);
+        const hist = withinHistory(fresh, cutoff);
+        count += await savePage(env, hist.keep, loc, maxAge);
         const reachedSeen = fresh.length < page.reviews.length;
         if (firstRun) {
-          // Older pages are history; hand them to the backfill phase
-          if (page.next) loc.backfill_token = page.next; else loc.backfill_done = 1;
+          // Older pages are history; hand them to the backfill phase unless this page already reached the cutoff
+          if (page.next && !hist.pastCutoff) loc.backfill_token = page.next;
+          else { loc.backfill_token = null; loc.backfill_done = 1; }
           break;
         }
         if (reachedSeen || !page.next) break;
@@ -142,14 +159,17 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
 async function backfill(env: Env, client: GBPClient, locs: Loc[], budget: Budget, notes: string[]): Promise<number> {
   const maxAge = num(env.MAX_AGE_DAYS, 14);
   let pagesLeft = num(env.BACKFILL_PAGES_PER_RUN, 20);
+  const cutoff = historyCutoff(env);
   let count = 0;
   for (const loc of locs) {
     if (loc.backfill_done || !loc.backfill_token) continue;
     try {
       while (loc.backfill_token && pagesLeft > 0 && budget.has(1)) {
         const page = await client.reviewPage(loc.account, loc.name, loc.backfill_token);
-        count += await savePage(env, page.reviews, loc, maxAge);
-        loc.backfill_token = page.next;
+        const hist = withinHistory(page.reviews, cutoff);
+        count += await savePage(env, hist.keep, loc, maxAge);
+        // Stop at the history cutoff; anything older already in the database stays put
+        loc.backfill_token = hist.pastCutoff ? null : page.next;
         pagesLeft--;
       }
       if (!loc.backfill_token) loc.backfill_done = 1;
@@ -164,7 +184,7 @@ async function backfill(env: Env, client: GBPClient, locs: Loc[], budget: Budget
 
 /** Draft one review and save the result. Returns the new status. */
 export async function draftAndRoute(env: Env, r: ReviewRow, actor = "agent", forceReview = false, budget: Budget = unlimited()): Promise<Status> {
-  const d = await draftReply(env, r.stars, r.text, rooftopByKey(r.rooftop_key), budget, (r as any).reviewer_name);
+  const d = await draftReply(env, r.stars, r.text, rooftopFor(r.rooftop_key, r.location_title), budget, (r as any).reviewer_name);
   const decision = route(r.stars, r.text, d, num(env.AUTO_POST_MIN_STARS, 4));
   const status: Status = forceReview || decision.action === "review" ? "pending" : "ready";
   await env.DB.prepare(

@@ -10,7 +10,7 @@ import { availableReplies, learnGuidelines, MIN_REPLIES } from "./learn";
 import { clearGuidelinesCache, currentGuidelines } from "./guidelines";
 import { CONCERN_LABEL, FIELDS_FOR, TEAMS_FOR, buildEmail, lastEscalation, getTeams, parseEscalation, resolveEscalation, saveTeams, sendEscalation, type Team } from "./escalate";
 import { Budget } from "./budget";
-import { canTag, monthRange, norm, parseRosterLines, rematch, scanReviews, type Staff } from "./staff";
+import { canTag, etDayStart, monthRange, norm, parseRosterLines, rematch, scanReviews, type Staff } from "./staff";
 import { allowedDomains, canSendAs, checkAddresses, mailConfigured, MailError } from "./mail";
 
 const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external')";
@@ -89,6 +89,15 @@ async function listReviews(env: Env, user: User, url: URL) {
   else if (status) { where.push("status = ?"); args.push(status); }
   const days = parseInt(url.searchParams.get("days") || "", 10);
   if (days > 0) { where.push("create_time >= ?"); args.push(new Date(Date.now() - days * 86400_000).toISOString()); }
+  // Custom range: whole days in Eastern time, end date included
+  const start = etDayStart(url.searchParams.get("start") || "");
+  const endDay = url.searchParams.get("end") || "";
+  if (start) { where.push("create_time >= ?"); args.push(start); }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(endDay)) {
+    const next = new Date(Date.parse(endDay + "T12:00:00Z") + 86400_000).toISOString().slice(0, 10);
+    const end = etDayStart(next);
+    if (end) { where.push("create_time < ?"); args.push(end); }
+  }
   const stars = url.searchParams.get("stars");
   if (stars === "low") where.push("stars <= 3");
   else if (stars === "high") where.push("stars >= 4");

@@ -16,6 +16,7 @@ export interface Env {
   EXTERNAL_REQUEST_BUDGET: string;
   BACKFILL_PAGES_PER_RUN: string;
   RUN_HOURS_ET: string;
+  HISTORY_START?: string;
   GBP_CLIENT_ID?: string;
   GBP_CLIENT_SECRET?: string;
   GBP_REFRESH_TOKEN?: string;

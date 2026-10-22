@@ -162,6 +162,21 @@ export async function rematch(env: Env, rooftop: string) {
   return writes.length;
 }
 
+/** Midnight Eastern time on a date like "2024-01-01", as a UTC ISO string. Returns null if the date is invalid. */
+export function etDayStart(ymd: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || "");
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const probe = new Date(Date.UTC(y, mo - 1, d));
+  if (probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) return null;
+  for (const off of [4, 5]) {
+    const t = new Date(Date.UTC(y, mo - 1, d, off));
+    const h = Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hourCycle: "h23" }).format(t));
+    if (h === 0) return t.toISOString();
+  }
+  return new Date(Date.UTC(y, mo - 1, d, 5)).toISOString();
+}
+
 /** First instant of a calendar month in Eastern time, as a UTC ISO string. "2026-09" -> 2026-09-01T04:00:00.000Z */
 export function etMonthStart(ym: string): string {
   let [y, m] = ym.split("-").map(Number);

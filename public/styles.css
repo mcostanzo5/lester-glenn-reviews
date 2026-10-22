@@ -82,6 +82,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .filters { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; align-items: center; }
 .filters select, .filters input, .field input, .field select { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius-s); padding: 7px 10px; font-size: 15px; }
 .filters input[type="search"] { flex: 1 1 220px; }
+.custom-range { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.custom-range label { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 14px; }
+.custom-range input { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius-s); padding: 6px 8px; font-size: 15px; }
 
 /* Review list */
 .list > .row-wrap:last-child { border-bottom: 0; }

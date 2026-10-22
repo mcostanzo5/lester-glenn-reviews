@@ -231,6 +231,12 @@ also caps CPU time at 10 ms per run, which heavy history-import runs can brush
 against (check the Worker's Metrics page for "Exceeded CPU" errors), and on paid
 you can set `EXTERNAL_REQUEST_BUDGET = "900"` so history imports in one run.
 
+## History cutoff
+
+The agent only imports Google reviews written on or after `HISTORY_START` in
+`wrangler.toml` (default `2024-01-01`, Eastern time). Older reviews already in the
+database stay. When a listing's import reaches the cutoff, it's marked Complete.
+
 ## Modes
 
 Scheduled runs happen at 8am, 12pm, 4pm, and 8pm Eastern all year, including

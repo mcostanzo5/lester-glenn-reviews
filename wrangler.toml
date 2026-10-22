@@ -46,6 +46,8 @@ RUN_HOURS_ET = "8,12,16,20"
 EXTERNAL_REQUEST_BUDGET = "45"
 # Pages of older reviews (50 each) imported per run for statistics
 BACKFILL_PAGES_PER_RUN = "20"
+# Don't import reviews older than this (Eastern time). Older ones already saved stay.
+HISTORY_START = "2024-01-01"
 
 # Secrets (set in Cloudflare: Worker > Settings > Runtime variables and secrets)
 # MS_CLIENT_SECRET, ANTHROPIC_API_KEY, GBP_CLIENT_ID, GBP_CLIENT_SECRET, GBP_REFRESH_TOKEN

@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import { rooftopByKey } from "./rooftops";
+import { rooftopFor } from "./rooftops";
 import { cleanReply } from "./drafter";
 import { SAFETY_RULES } from "./guidelines";
 
@@ -59,14 +59,14 @@ export async function availableReplies(env: Env): Promise<number> {
 
 async function sampleFromGoogle(env: Env): Promise<{ text: string; used: number }> {
   const q = env.DB.prepare(
-    `SELECT rooftop_key, stars, text, reply_text FROM reviews
+    `SELECT rooftop_key, location_title, stars, text, reply_text FROM reviews
      WHERE is_sample = 0 AND reply_source IN ('google','manager') AND length(reply_text) > 20 AND stars = ?
      ORDER BY reply_time DESC LIMIT ?`
   );
   const batches = await env.DB.batch([1, 2, 3, 4, 5].map((n) => q.bind(n, PER_RATING)));
   const rows = batches.flatMap((b) => b.results as any[]);
   const text = rows.map((r) => JSON.stringify({
-    store: rooftopByKey(r.rooftop_key).name,
+    store: rooftopFor(r.rooftop_key, r.location_title).name,
     stars: r.stars,
     review: (r.text || "(rating only)").slice(0, 400),
     reply: r.reply_text,

@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { me: null, view: "inbox", rooftop: "", filters: { status: "", stars: "", q: "", days: "" }, page: 0, rows: [], selected: null, statsDays: 90 };
+const state = { me: null, view: "inbox", rooftop: "", filters: { status: "", stars: "", q: "", days: "", start: "", end: "" }, page: 0, rows: [], selected: null, statsDays: 90 };
 
 const STATUS = {
   new: ["Waiting for draft", ""],
@@ -185,7 +185,7 @@ function setView(view) {
 async function loadList(append = false) {
   const q = new URLSearchParams({ view: state.view, page: String(state.page) });
   if (state.rooftop) q.set("rooftop", state.rooftop);
-  if (state.view === "all") for (const [k, v] of Object.entries(state.filters)) if (v) q.set(k, v);
+  if (state.view === "all") for (const [k, v] of Object.entries(state.filters)) if (v && !(k === "days" && v === "custom")) q.set(k, v);
   const v = $("#view");
   if (!append) v.innerHTML = filtersHtml() + `<div class="empty-state">Loading reviews\u2026</div>`;
   bindFilters();
@@ -208,11 +208,16 @@ function filtersHtml() {
     <select id="fStatus">${opt("", "Any status", f.status)}${opt("open", "Not answered", f.status)}${opt("answered", "Answered", f.status)}
       ${opt("pending", "Needs review", f.status)}${opt("dismissed", "Dismissed", f.status)}${opt("old_unanswered", "Not answered, over 14 days old", f.status)}</select>
     <label class="sr" for="fDays">Time range</label>
-    <select id="fDays">${opt("", "Any time", f.days)}${opt("7", "Last 7 days", f.days)}${opt("30", "Last 30 days", f.days)}${opt("90", "Last 90 days", f.days)}${opt("365", "Last 12 months", f.days)}</select>
+    <select id="fDays">${opt("", "Any time", f.days)}${opt("7", "Last 7 days", f.days)}${opt("30", "Last 30 days", f.days)}${opt("90", "Last 90 days", f.days)}${opt("365", "Last 12 months", f.days)}${opt("custom", "Custom range\u2026", f.days)}</select>
     <label class="sr" for="fStars">Rating</label>
     <select id="fStars">${opt("", "Any rating", f.stars)}${opt("low", "3 stars or less", f.stars)}${opt("high", "4 and 5 stars", f.stars)}</select>
     <label class="sr" for="fQ">Search</label>
     <input type="search" id="fQ" placeholder="Search reviews, replies, and reviewer names" value="${esc(f.q)}">
+    ${f.days === "custom" ? `<div class="custom-range">
+      <label>From <input type="date" id="fStart" value="${esc(f.start)}" max="${new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" })}"></label>
+      <label>To <input type="date" id="fEnd" value="${esc(f.end)}" max="${new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" })}"></label>
+      ${f.start || f.end ? `<button type="button" class="btn quiet" id="fClearRange">Clear dates</button>` : ""}
+    </div>` : ""}
   </form>`;
 }
 
@@ -220,12 +225,17 @@ function bindFilters() {
   const form = $("#filters");
   if (!form) return;
   const apply = () => {
-    state.filters = { status: $("#fStatus").value, stars: $("#fStars").value, q: $("#fQ").value.trim(), days: $("#fDays").value };
+    const custom = $("#fDays").value === "custom";
+    let start = custom && $("#fStart") ? $("#fStart").value : "", end = custom && $("#fEnd") ? $("#fEnd").value : "";
+    if (start && end && start > end) [start, end] = [end, start];
+    state.filters = { status: $("#fStatus").value, stars: $("#fStars").value, q: $("#fQ").value.trim(), days: $("#fDays").value, start, end };
     state.page = 0;
     loadList();
   };
   $("#fStatus").onchange = apply;
   $("#fDays").onchange = apply;
+  if ($("#fStart")) { $("#fStart").onchange = apply; $("#fEnd").onchange = apply; }
+  if ($("#fClearRange")) $("#fClearRange").onclick = () => { $("#fStart").value = ""; $("#fEnd").value = ""; apply(); };
   $("#fStars").onchange = apply;
   let t;
   $("#fQ").oninput = () => { clearTimeout(t); t = setTimeout(apply, 350); };
@@ -905,7 +915,7 @@ async function renderStats() {
   v.querySelectorAll("[data-open-unanswered]").forEach((b) => (b.onclick = () => {
     // Open All reviews filtered to the same unanswered reviews this number counts
     if (b.dataset.openUnanswered) state.rooftop = b.dataset.openUnanswered;
-    state.filters = { status: "open", stars: "", q: "", days: state.statsDays ? String(state.statsDays) : "" };
+    state.filters = { status: "open", stars: "", q: "", days: state.statsDays ? String(state.statsDays) : "", start: "", end: "" };
     renderRail();
     setView("all");
   }));

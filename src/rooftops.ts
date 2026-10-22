@@ -37,7 +37,9 @@ export const ROOFTOPS: Rooftop[] = [
 ];
 
 export const DEFAULT_ROOFTOP: Rooftop = {
-  key: "other", name: "Lester Glenn Auto Group", brand: "", town: "", phone: "",
+  // Catch-all for any Google listing that doesn't match a store above. If this shows up
+  // in the dashboard, a listing name needs a matching rule.
+  key: "other", name: "Unmatched Google listing", brand: "", town: "", phone: "",
   signoff: "The Lester Glenn Team", contacts: { sales: "our Sales Manager", service: "our Service Manager" },
 };
 
@@ -49,6 +51,14 @@ export function matchRooftop(title: string | undefined): Rooftop {
     if (all && any) return r;
   }
   return DEFAULT_ROOFTOP;
+}
+
+/** The store as customers know it. Unmatched listings use their own Google listing name. */
+export function rooftopFor(key: string, listingTitle?: string | null): Rooftop {
+  const r = rooftopByKey(key);
+  if (r.key !== "other") return r;
+  const name = (listingTitle || "").trim() || "Lester Glenn Auto Group";
+  return { ...r, name, signoff: "The Lester Glenn Team" };
 }
 
 export function rooftopByKey(key: string): Rooftop {

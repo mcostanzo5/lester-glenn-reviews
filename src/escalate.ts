@@ -1,6 +1,6 @@
 import type { Env, ReviewRow, User } from "./types";
 import { nowIso } from "./types";
-import { rooftopByKey } from "./rooftops";
+import { rooftopFor } from "./rooftops";
 import { checkAddresses, decryptText, encryptText, sendAs } from "./mail";
 import { logEvent } from "./agent";
 
@@ -87,7 +87,7 @@ export function parseEscalation(env: Env, body: any): { input?: EscalationInput;
 }
 
 export function buildEmail(r: ReviewRow, input: EscalationInput, sender: User, origin: string, sentAt: string) {
-  const store = rooftopByKey(r.rooftop_key).name;
+  const store = rooftopFor(r.rooftop_key, r.location_title).name;
   const followups = r.escalation_open ?? 0;      // earlier sends since last resolved
   const commNumber = (r.escalation_count ?? 0) + 1;
   const firstAt = r.escalation_first_at || sentAt;
