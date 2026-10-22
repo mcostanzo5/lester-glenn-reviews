@@ -138,7 +138,7 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
         const reachedSeen = fresh.length < page.reviews.length;
         if (firstRun) {
           // Older pages are history; hand them to the backfill phase unless this page already reached the cutoff
-          if (page.next && !hist.pastCutoff) loc.backfill_token = page.next;
+          if (page.next && !hist.pastCutoff) loc.backfill_token = makeBookmark(page.reviews, page.next);
           else { loc.backfill_token = null; loc.backfill_done = 1; }
           break;
         }
@@ -155,29 +155,47 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
   return count;
 }
 
-/** Last phase: import older history for statistics with whatever budget is left. */
+/** The history import's bookmark: how far back this listing has reached, plus Google's page token.
+ *  Stored together in locations.backfill_token as "<oldest date reached>|<token>". */
+function readBookmark(t: string | null): { reached: string; token: string } | null {
+  if (!t) return null;
+  const i = t.indexOf("|");
+  return i > 0 && /^\d{4}-/.test(t) ? { reached: t.slice(0, i), token: t.slice(i + 1) } : { reached: "", token: t };
+}
+function makeBookmark(page: GReview[], next: string | null): string | null {
+  if (!next) return null;
+  const reached = page.length ? page[page.length - 1].update_time : "";
+  return reached ? `${reached}|${next}` : next;
+}
+
+/** Last phase: import older history with whatever budget is left, newest first across all listings. */
 async function backfill(env: Env, client: GBPClient, locs: Loc[], budget: Budget, notes: string[]): Promise<number> {
   const maxAge = num(env.MAX_AGE_DAYS, 14);
   let pagesLeft = num(env.BACKFILL_PAGES_PER_RUN, 20);
   const cutoff = historyCutoff(env);
   let count = 0;
-  for (const loc of locs) {
-    if (loc.backfill_done || !loc.backfill_token) continue;
+  let active = locs.filter((l) => !l.backfill_done && l.backfill_token);
+  // Each step takes the next page from the listing that has gone back the least, so every
+  // store's most recent reviews come in first and all stores move back in time together.
+  const reachedOf = (l: Loc) => readBookmark(l.backfill_token)?.reached || "9999"; // unknown = do first
+  while (active.length && pagesLeft > 0 && budget.has(1)) {
+    const loc = active.reduce((a, b) => (reachedOf(b) > reachedOf(a) ? b : a));
     try {
-      while (loc.backfill_token && pagesLeft > 0 && budget.has(1)) {
-        const page = await client.reviewPage(loc.account, loc.name, loc.backfill_token);
-        const hist = withinHistory(page.reviews, cutoff);
-        count += await savePage(env, hist.keep, loc, maxAge);
-        // Stop at the history cutoff; anything older already in the database stays put
-        loc.backfill_token = hist.pastCutoff ? null : page.next;
-        pagesLeft--;
-      }
+      const page = await client.reviewPage(loc.account, loc.name, readBookmark(loc.backfill_token)!.token);
+      const hist = withinHistory(page.reviews, cutoff);
+      count += await savePage(env, hist.keep, loc, maxAge);
+      // Stop at the history cutoff; anything older already in the database stays put
+      loc.backfill_token = hist.pastCutoff ? null : makeBookmark(page.reviews, page.next);
       if (!loc.backfill_token) loc.backfill_done = 1;
+      pagesLeft--;
     } catch (e) {
-      if (!(e instanceof BudgetExhausted)) notes.push(`${loc.title} history: ${(e as Error).message}`);
+      if (e instanceof BudgetExhausted) break;
+      notes.push(`${loc.title} history: ${(e as Error).message}`);
+      active = active.filter((l) => l !== loc); // try this listing again next run
+      continue;
     }
     await saveLoc(env, loc);
-    if (pagesLeft <= 0 || !budget.has(1)) break;
+    if (loc.backfill_done) active = active.filter((l) => l !== loc);
   }
   return count;
 }
