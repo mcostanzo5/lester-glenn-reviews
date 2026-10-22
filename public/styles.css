@@ -223,6 +223,12 @@ tr.clickable:hover td { background: var(--paper); }
 .kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--panel); margin-bottom: 22px; }
 .kpi { padding: 14px 16px; border-right: 1px solid var(--line); }
 .kpi:last-child { border-right: 0; }
+.kpi-link { border: 0; border-right: 1px solid var(--line); background: none; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.kpi-link:last-child { border-right: 0; }
+.kpi-link:hover:not([disabled]) { background: var(--paper); }
+.kpi-link:not([disabled]) .fig { color: var(--red); }
+.kpi-link[disabled] { cursor: default; }
+.link-btn { border: 0; background: none; color: var(--blue); font: inherit; font-weight: 700; text-decoration: underline; cursor: pointer; padding: 0; }
 .kpi .fig { font-family: var(--font-figures); font-size: 34px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .kpi .fig small { font-size: 18px; font-weight: 600; color: var(--muted); margin-left: 2px; }
 .kpi .cap { font-size: 14px; color: var(--muted); }

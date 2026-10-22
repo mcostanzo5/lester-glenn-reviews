@@ -87,6 +87,8 @@ async function listReviews(env: Env, user: User, url: URL) {
   else if (status === "open") where.push(`status IN ${OPEN_SQL}`);
   else if (status === "answered") where.push(`status IN ${ANSWERED_SQL}`);
   else if (status) { where.push("status = ?"); args.push(status); }
+  const days = parseInt(url.searchParams.get("days") || "", 10);
+  if (days > 0) { where.push("create_time >= ?"); args.push(new Date(Date.now() - days * 86400_000).toISOString()); }
   const stars = url.searchParams.get("stars");
   if (stars === "low") where.push("stars <= 3");
   else if (stars === "high") where.push("stars >= 4");

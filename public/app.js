@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { me: null, view: "inbox", rooftop: "", filters: { status: "", stars: "", q: "" }, page: 0, rows: [], selected: null, statsDays: 90 };
+const state = { me: null, view: "inbox", rooftop: "", filters: { status: "", stars: "", q: "", days: "" }, page: 0, rows: [], selected: null, statsDays: 90 };
 
 const STATUS = {
   new: ["Waiting for draft", ""],
@@ -206,7 +206,9 @@ function filtersHtml() {
   return `<form class="filters" id="filters" role="search" onsubmit="return false">
     <label class="sr" for="fStatus">Status</label>
     <select id="fStatus">${opt("", "Any status", f.status)}${opt("open", "Not answered", f.status)}${opt("answered", "Answered", f.status)}
-      ${opt("pending", "Needs review", f.status)}${opt("dismissed", "Dismissed", f.status)}${opt("old_unanswered", "Unanswered, older", f.status)}</select>
+      ${opt("pending", "Needs review", f.status)}${opt("dismissed", "Dismissed", f.status)}${opt("old_unanswered", "Not answered, over 14 days old", f.status)}</select>
+    <label class="sr" for="fDays">Time range</label>
+    <select id="fDays">${opt("", "Any time", f.days)}${opt("7", "Last 7 days", f.days)}${opt("30", "Last 30 days", f.days)}${opt("90", "Last 90 days", f.days)}${opt("365", "Last 12 months", f.days)}</select>
     <label class="sr" for="fStars">Rating</label>
     <select id="fStars">${opt("", "Any rating", f.stars)}${opt("low", "3 stars or less", f.stars)}${opt("high", "4 and 5 stars", f.stars)}</select>
     <label class="sr" for="fQ">Search</label>
@@ -218,11 +220,12 @@ function bindFilters() {
   const form = $("#filters");
   if (!form) return;
   const apply = () => {
-    state.filters = { status: $("#fStatus").value, stars: $("#fStars").value, q: $("#fQ").value.trim() };
+    state.filters = { status: $("#fStatus").value, stars: $("#fStars").value, q: $("#fQ").value.trim(), days: $("#fDays").value };
     state.page = 0;
     loadList();
   };
   $("#fStatus").onchange = apply;
+  $("#fDays").onchange = apply;
   $("#fStars").onchange = apply;
   let t;
   $("#fQ").oninput = () => { clearTimeout(t); t = setTimeout(apply, 350); };
@@ -865,7 +868,7 @@ async function renderStats() {
     <div class="kpi"><div class="fig">${hoursLabel(o.avg_hours)}</div><div class="cap">Average time to reply</div></div>
     <div class="kpi"><div class="fig">${pct(o.within_24, o.answered)}<small>%</small></div><div class="cap">Replies within 24 hours</div></div>
     <div class="kpi"><div class="fig">${o.avg_stars ?? "\u2013"}</div><div class="cap">Average rating, ${o.total} reviews</div></div>
-    <div class="kpi"><div class="fig">${o.open}</div><div class="cap">Still unanswered</div></div>
+    <button class="kpi kpi-link" data-open-unanswered="" ${o.open ? "" : "disabled"}><div class="fig">${o.open}</div><div class="cap">Still unanswered${o.open ? " \u203a" : ""}</div></button>
   </div>`;
 
   const rows = s.rooftops.slice().sort((a, b) => b.total - a.total).map((r) => {
@@ -874,7 +877,7 @@ async function renderStats() {
     return `<tr><td>${esc(r.name.replace(/^Lester Glenn /, ""))}</td><td class="num">${r.total}</td><td class="num">${r.avg_stars ?? "\u2013"}</td>
       <td><div class="rate"><div class="bar"><span class="${rate < 80 ? "warn" : ""}" style="width:${rate}%"></span></div>${rate}%</div></td>
       <td class="num">${r.avg_hours == null ? "\u2013" : r.avg_hours < 48 ? Math.round(r.avg_hours) + " hr" : (r.avg_hours / 24).toFixed(1) + " days"}</td>
-      <td class="num">${r.open}</td>
+      <td class="num">${r.open ? `<button class="link-btn" data-open-unanswered="${esc(r.rooftop_key)}">${r.open}</button>` : 0}</td>
       <td class="num ${oldest > 3 ? "late" : ""}">${oldest == null ? "\u2013" : oldest < 1 ? "Today" : Math.round(oldest) + " days"}</td></tr>`;
   }).join("");
   const table = s.rooftops.length > 1 || !state.rooftop ? `<div class="panel"><h3>By store</h3>
@@ -899,6 +902,13 @@ async function renderStats() {
       </div></div>
     </div></div>`;
   $("#sDays").onchange = (e) => { state.statsDays = parseInt(e.target.value, 10); renderStats(); };
+  v.querySelectorAll("[data-open-unanswered]").forEach((b) => (b.onclick = () => {
+    // Open All reviews filtered to the same unanswered reviews this number counts
+    if (b.dataset.openUnanswered) state.rooftop = b.dataset.openUnanswered;
+    state.filters = { status: "open", stars: "", q: "", days: state.statsDays ? String(state.statsDays) : "" };
+    renderRail();
+    setView("all");
+  }));
 }
 
 function monthlyChart(months) {
