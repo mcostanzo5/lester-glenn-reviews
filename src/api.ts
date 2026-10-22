@@ -15,8 +15,18 @@ import { allowedDomains, canSendAs, checkAddresses, mailConfigured, MailError } 
 
 const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external')";
 const OPEN_SQL = "('new','pending','ready','approved','error','old_unanswered')";
-// The Inbox is every review without a reply (dismissed ones excluded)
-const INBOX_SQL = OPEN_SQL;
+/** The Inbox: every review without a reply (dismissed excluded), except that reviews too old
+ *  for an automatic draft only show if they're from the current calendar year (Eastern).
+ *  Open escalations always show. */
+async function inboxWhere(env: Env): Promise<{ sql: string; args: unknown[] }> {
+  const year = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }).slice(0, 4);
+  const yearStart = etDayStart(`${year}-01-01`)!;
+  const escalated = (await hasEscalationCols(env)) ? " OR escalation_open > 0" : "";
+  return {
+    sql: `(status IN ('new','pending','ready','approved','error') OR (status = 'old_unanswered' AND (create_time >= ?${escalated})))`,
+    args: [yearStart],
+  };
+}
 
 export function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
@@ -56,9 +66,10 @@ function nextScheduledRun(hours = "8,12,16,20"): string | null {
 
 async function me(env: Env, user: User) {
   const s = scope(user, env);
+  const inbox = await inboxWhere(env);
   const counts = (await env.DB.prepare(
-    `SELECT rooftop_key, COUNT(*) n FROM reviews WHERE ${s.sql} AND status IN ${INBOX_SQL} GROUP BY rooftop_key`
-  ).bind(...s.args).all<{ rooftop_key: string; n: number }>()).results;
+    `SELECT rooftop_key, COUNT(*) n FROM reviews WHERE ${s.sql} AND ${inbox.sql} GROUP BY rooftop_key`
+  ).bind(...s.args, ...inbox.args).all<{ rooftop_key: string; n: number }>()).results;
   const map = Object.fromEntries(counts.map((c) => [c.rooftop_key, c.n]));
   let escalations: number | null = null;
   try {
@@ -83,7 +94,7 @@ async function listReviews(env: Env, user: User, url: URL) {
   const where = [s.sql];
   const args = [...s.args];
   const status = url.searchParams.get("status");
-  if (view === "inbox") where.push(`status IN ${INBOX_SQL}`);
+  if (view === "inbox") { const inbox = await inboxWhere(env); where.push(inbox.sql); args.push(...inbox.args); }
   else if (view === "escalations") where.push("escalation_open > 0");
   else if (status === "open") where.push(`status IN ${OPEN_SQL}`);
   else if (status === "answered") where.push(`status IN ${ANSWERED_SQL}`);
