@@ -38,6 +38,8 @@ REPLY_APPROVERS = "mcostanzo@lesterglenn.com,mbellina@lesterglenn.com"
 MAX_AGE_DAYS = "14"
 MAX_DRAFTS_PER_RUN = "25"
 AUTO_POST_MIN_STARS = "4"
+# "off": nothing posts until an approver approves it (even in live mode). "on": clean 4-5 star drafts post on their own.
+AUTO_POST = "off"
 CLAUDE_MODEL = "claude-sonnet-5"
 # Hours (24h, Eastern) when scheduled runs happen
 RUN_HOURS_ET = "8,12,16,20"

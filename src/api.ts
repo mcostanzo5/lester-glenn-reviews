@@ -1,5 +1,5 @@
 import type { Env, ReviewRow, User } from "./types";
-import { mode, nowIso } from "./types";
+import { autoPost, mode, nowIso } from "./types";
 import { canAct, canSee, wasRecipient } from "./auth";
 import { ROOFTOPS, DEFAULT_ROOFTOP } from "./rooftops";
 import { GBPClient } from "./gbp";
@@ -15,7 +15,8 @@ import { allowedDomains, canSendAs, checkAddresses, mailConfigured, MailError } 
 
 const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external')";
 const OPEN_SQL = "('new','pending','ready','approved','error','old_unanswered')";
-const INBOX_SQL = "('new','pending','error')";
+// The Inbox is every review without a reply (dismissed ones excluded)
+const INBOX_SQL = OPEN_SQL;
 
 export function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
@@ -67,7 +68,7 @@ async function me(env: Env, user: User) {
   const lastRun = await env.DB.prepare("SELECT finished_at, trigger, errors FROM runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1")
     .first<{ finished_at: string; trigger: string; errors: number }>();
   return json({
-    email: user.email, name: user.name, role: user.role, canReply: user.canReply, mode: mode(env), escalations,
+    email: user.email, name: user.name, role: user.role, canReply: user.canReply, mode: mode(env), autoPost: autoPost(env), escalations,
     lastRun: lastRun ? { at: lastRun.finished_at, manual: lastRun.trigger.startsWith("manual"), errors: lastRun.errors } : null,
     nextRun: mode(env) === "dry_run" ? null : nextScheduledRun(env.RUN_HOURS_ET),
     approvers: (env.REPLY_APPROVERS || "").split(",").map((e) => e.trim()).filter(Boolean),
@@ -112,13 +113,22 @@ async function listReviews(env: Env, user: User, url: URL) {
     args.push(`%${q}%`, `%${q}%`, `%${q}%`, ...(byName ? [`%${q}%`] : []));
   }
   const page = Math.max(0, parseInt(url.searchParams.get("page") || "0", 10) || 0);
-  const order = view === "inbox" ? "CASE status WHEN 'pending' THEN 0 WHEN 'error' THEN 1 WHEN 'new' THEN 2 ELSE 3 END, create_time ASC"
+  // Inbox order: open escalations, flagged, failed posts, waiting for a draft, drafts ready, approved, older unanswered
+  const order = view === "inbox" ? `CASE WHEN ${await hasEscalationCols(env) ? "escalation_open > 0" : "0"} THEN 0 ELSE 1 END,
+      CASE status WHEN 'pending' THEN 0 WHEN 'error' THEN 1 WHEN 'new' THEN 2 WHEN 'ready' THEN 3 WHEN 'approved' THEN 4 ELSE 5 END, create_time DESC`
     : view === "escalations" ? "escalation_first_at ASC" // longest-waiting first
     : "create_time DESC";
   const rows = (await env.DB.prepare(`SELECT * FROM reviews WHERE ${where.join(" AND ")} ORDER BY ${order} LIMIT 51 OFFSET ?`)
     .bind(...args, page * 50).all<ReviewRow>()).results;
   for (const row of rows) delete (row as any).escalation_details;
   return json({ reviews: rows.slice(0, 50), more: rows.length > 50, page });
+}
+
+let escalationColsReady = false;
+async function hasEscalationCols(env: Env): Promise<boolean> {
+  if (escalationColsReady) return true;
+  try { await env.DB.prepare("SELECT escalation_open FROM reviews LIMIT 1").first(); escalationColsReady = true; } catch { /* not yet */ }
+  return escalationColsReady;
 }
 
 let reviewerNamesReady = false;

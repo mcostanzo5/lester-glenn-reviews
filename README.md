@@ -231,6 +231,14 @@ also caps CPU time at 10 ms per run, which heavy history-import runs can brush
 against (check the Worker's Metrics page for "Exceeded CPU" errors), and on paid
 you can set `EXTERNAL_REQUEST_BUDGET = "900"` so history imports in one run.
 
+## Inbox and approvals
+
+The Inbox is every review without a reply, most urgent first: open escalations
+(shown with a red frame), flagged drafts, failed posts, reviews waiting for a
+draft, drafts ready for approval, approved replies waiting to go live, then
+older unanswered reviews. With `AUTO_POST = "off"` (the default), nothing posts
+until an approver clicks Approve and post, even in live mode.
+
 ## History cutoff
 
 The agent only imports Google reviews written on or after `HISTORY_START` in
@@ -249,7 +257,7 @@ Admins can also click **Run agent now** in Settings at any time.
 |---|---|---|---|
 | `dry_run` | No, sample data only | Never | Paused (use Run agent now) |
 | `shadow` | Yes | Never | 4 times a day |
-| `live` | Yes | Safe replies and approved replies | 4 times a day |
+| `live` | Yes | Approved replies (plus clean 4-5 star drafts only if `AUTO_POST = "on"`) | 4 times a day |
 
 ## Testing on your own computer
 

@@ -17,6 +17,7 @@ export interface Env {
   BACKFILL_PAGES_PER_RUN: string;
   RUN_HOURS_ET: string;
   HISTORY_START?: string;
+  AUTO_POST?: string;
   GBP_CLIENT_ID?: string;
   GBP_CLIENT_SECRET?: string;
   GBP_REFRESH_TOKEN?: string;
@@ -83,6 +84,11 @@ export interface User {
 export function mode(env: Env): Mode {
   const m = (env.AGENT_MODE || "dry_run").trim().toLowerCase();
   return m === "live" || m === "shadow" ? m : "dry_run";
+}
+
+/** Auto-posting is off unless AUTO_POST = "on". When off, every reply waits for an approver. */
+export function autoPost(env: Env): boolean {
+  return (env.AUTO_POST || "off").trim().toLowerCase() === "on";
 }
 
 export function num(v: string | undefined, fallback: number): number {

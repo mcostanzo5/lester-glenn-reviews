@@ -156,6 +156,12 @@ body.link-mode .detail { position: static; max-width: 760px; margin: 24px auto; 
 .sent-list li:last-child { border-bottom: 0; }
 .sent-list .meta { display: block; margin: 0; }
 
+/* Escalated and still unanswered: red all around */
+.list .row-wrap.escalated { border: 2px solid var(--red); border-radius: var(--radius-s); margin: 4px; background: var(--red-wash); }
+.list .row-wrap.escalated:last-child { border-bottom: 2px solid var(--red); }
+.list .row-wrap.escalated .row:hover { background: transparent; }
+.pill.hot { background: var(--red); color: #fff; }
+
 /* Escalation */
 .tab-count:not(:empty) { display: inline-block; min-width: 20px; padding: 0 6px; margin-left: 4px; border-radius: 999px; background: var(--red); color: #fff; font-size: 12.5px; line-height: 20px; text-align: center; }
 .row-wrap.has-quick.has-resolve .row { padding-right: 150px; }

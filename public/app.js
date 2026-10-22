@@ -5,7 +5,7 @@ const state = { me: null, view: "inbox", rooftop: "", filters: { status: "", sta
 const STATUS = {
   new: ["Waiting for draft", ""],
   pending: ["Needs review", "pending"],
-  ready: ["Ready to auto-post", "ready"],
+  ready: ["Draft ready", "ready"],
   approved: ["Approved, posts when live", "approved"],
   auto_posted: ["Auto-posted", "posted"],
   approved_posted: ["Posted by manager", "posted"],
@@ -15,6 +15,7 @@ const STATUS = {
   error: ["Post failed", "error"],
 };
 const ANSWERED = ["auto_posted", "approved_posted", "replied_external"];
+const OPEN_STATUSES = ["new", "pending", "ready", "approved", "error", "old_unanswered"];
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -93,6 +94,7 @@ async function boot() {
   chip.hidden = false;
   chip.textContent = { dry_run: "Dry run", shadow: "Shadow mode", live: "Live" }[m.mode];
   chip.classList.toggle("live", m.mode === "live");
+  STATUS.ready = [m.autoPost ? "Ready to auto-post" : "Draft ready", "ready"];
   renderRunStatus();
   const banner = $("#banner");
   if (m.mode === "dry_run") { banner.hidden = false; banner.textContent = "Dry run: showing sample reviews. Nothing is read from or posted to Google."; }
@@ -247,7 +249,7 @@ function renderList(more) {
     const msg = state.view === "escalations"
       ? `<strong>No open escalations</strong>Reviews that have been emailed to a store team show up here until someone marks them resolved.`
       : state.view === "inbox"
-      ? `<strong>Inbox is clear</strong>New reviews that need a manager will show up here.${state.me.mode === "dry_run" && state.me.role === "admin" ? " Load sample data from Settings to try it out." : ""}`
+      ? `<strong>Inbox is clear</strong>Every review has a reply. New reviews show up here until they're answered.${state.me.mode === "dry_run" && state.me.role === "admin" ? " Load sample data from Settings to try it out." : ""}`
       : `<strong>No reviews match</strong>Try a different filter or store.`;
     v.innerHTML = filtersHtml() + `<div class="empty-state">${msg}</div>`;
     bindFilters();
@@ -273,6 +275,7 @@ function renderList(more) {
 function rowHtml(r) {
   const text = r.text ? esc(r.text) : "Rating only, no written review";
   const escView = state.view === "escalations";
+  const hot = (r.escalation_open || 0) > 0 && !ANSWERED.includes(r.status);
   const resolveBtn = escView && (state.me.role === "admin" || state.me.role === "manager")
     ? `<button class="esc-resolve" data-resolve="${esc(r.id)}" title="The team responded: remove from Escalations">Resolved</button>` : "";
   const quick = (state.me.role === "admin" || state.me.role === "manager")
@@ -280,8 +283,8 @@ function rowHtml(r) {
   const followups = (r.escalation_open || 0) - 1;
   const when = escView
     ? `<span class="when-line">First sent ${ago(r.escalation_first_at)}</span><span class="when-line">${r.escalation_count} ${r.escalation_count === 1 ? "email" : "emails"}, last ${ago(r.escalation_last_at)}</span>${followups > 0 ? `<span class="when-line late">${followups} follow-up${followups === 1 ? "" : "s"}, no response</span>` : ""}`
-    : `${ago(r.create_time)}<br>${pill(r.status, r.is_sample)}${r.escalation_count ? ` <span class="pill esc" title="Emails sent to the team about this review">\u2709 ${r.escalation_count}</span>` : ""}`;
-  return `<div class="row-wrap${quick ? " has-quick" : ""}${resolveBtn ? " has-resolve" : ""}"><button class="row" data-id="${esc(r.id)}" aria-current="${state.selected === r.id}">
+    : `${ago(r.create_time)}<br>${hot ? `<span class="pill hot">Escalated</span> ` : ""}${pill(r.status, r.is_sample)}${r.escalation_count ? ` <span class="pill esc" title="Emails sent to the team about this review">\u2709 ${r.escalation_count}</span>` : ""}`;
+  return `<div class="row-wrap${quick ? " has-quick" : ""}${resolveBtn ? " has-resolve" : ""}${hot ? " escalated" : ""}"><button class="row" data-id="${esc(r.id)}" aria-current="${state.selected === r.id}">
     <div class="stars-col">${stars(r.stars)}</div>
     <div><div class="store">${esc(shortName(r.rooftop_key))}${r.reviewer_name ? ` <span class="reviewer">${esc(r.reviewer_name)}</span>` : ""}</div><div class="excerpt${r.text ? "" : " empty"}">${text}</div></div>
     <div class="when">${when}</div>
@@ -406,7 +409,7 @@ async function act(id, action, btn) {
     toast({ approve: r.status === "approved_posted" ? "Reply posted to Google" : "Reply approved", save: "Edits saved", redraft: "New draft written", dismiss: "Review dismissed", reopen: "Moved back to inbox", resolve: "Escalation marked resolved" }[action]);
     const i = state.rows.findIndex((x) => x.id === id);
     if (i >= 0) state.rows[i] = r;
-    if (state.view === "inbox") state.rows = state.rows.filter((x) => ["new", "pending", "error"].includes(x.status));
+    if (state.view === "inbox") state.rows = state.rows.filter((x) => OPEN_STATUSES.includes(x.status));
     if (state.view === "escalations") state.rows = state.rows.filter((x) => (x.escalation_open || 0) > 0);
     renderList(false);
     refreshCounts();
@@ -952,7 +955,8 @@ async function renderSettings() {
   const modeText = {
     dry_run: "Dry run. The agent only works with sample data and never touches Google. Scheduled runs are paused in this mode; use Run agent now to test.",
     shadow: "Shadow. The agent reads real Google reviews at 8am, 12pm, 4pm, and 8pm Eastern and writes drafts, but never posts.",
-    live: "Live. Four times a day, positive, low-risk replies post automatically, and approved replies post right away.",
+    live: m === "live" && !state.me.autoPost ? "Live. Nothing posts on its own: every reply posts only when an approver clicks Approve and post."
+      : "Live. Four times a day, positive, low-risk replies post automatically, and approved replies post right away.",
   }[m];
 
   const roleName = { admin: "Admin", manager: "Manager", viewer: "View only" };

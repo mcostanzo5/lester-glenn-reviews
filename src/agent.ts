@@ -1,5 +1,5 @@
 import type { Env, ReviewRow, Status } from "./types";
-import { ANSWERED, mode, num, nowIso } from "./types";
+import { ANSWERED, autoPost, mode, num, nowIso } from "./types";
 import { GBPClient, GBPError, type GReview } from "./gbp";
 import { matchRooftop, rooftopByKey, rooftopFor } from "./rooftops";
 import { draftReply } from "./drafter";
@@ -268,7 +268,7 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
     // 3. Live: post auto-cleared drafts and anything a manager approved
     if (m === "live" && client && budget.has(1)) {
       const toPost = (await env.DB.prepare(
-        `SELECT * FROM reviews WHERE status IN ('ready','approved') AND is_sample=0 AND draft IS NOT NULL AND reply_text IS NULL
+        `SELECT * FROM reviews WHERE status IN (${autoPost(env) ? "'ready','approved'" : "'approved'"}) AND is_sample=0 AND draft IS NOT NULL AND reply_text IS NULL
          ORDER BY status = 'approved' DESC, create_time ASC LIMIT ?`
       ).bind(Math.min(50, budget.left)).all<ReviewRow>()).results;
       for (const r of toPost) {
