@@ -78,7 +78,11 @@ async function listReviews(env: Env, user: User, url: URL) {
   const range = monthRange(url.searchParams.get("from") || "", url.searchParams.get("to") || "");
   if (range) { where.push("create_time >= ? AND create_time < ?"); args.push(range[0], range[1]); }
   const q = (url.searchParams.get("q") || "").trim();
-  if (q) { where.push("(text LIKE ? OR draft LIKE ? OR reply_text LIKE ?)"); args.push(`%${q}%`, `%${q}%`, `%${q}%`); }
+  if (q) {
+    const byName = await hasReviewerNames(env);
+    where.push(`(text LIKE ? OR draft LIKE ? OR reply_text LIKE ?${byName ? " OR reviewer_name LIKE ?" : ""})`);
+    args.push(`%${q}%`, `%${q}%`, `%${q}%`, ...(byName ? [`%${q}%`] : []));
+  }
   const page = Math.max(0, parseInt(url.searchParams.get("page") || "0", 10) || 0);
   const order = view === "inbox" ? "CASE status WHEN 'pending' THEN 0 WHEN 'error' THEN 1 WHEN 'new' THEN 2 ELSE 3 END, create_time ASC"
     : view === "escalations" ? "escalation_first_at ASC" // longest-waiting first
@@ -87,6 +91,14 @@ async function listReviews(env: Env, user: User, url: URL) {
     .bind(...args, page * 50).all<ReviewRow>()).results;
   for (const row of rows) delete (row as any).escalation_details;
   return json({ reviews: rows.slice(0, 50), more: rows.length > 50, page });
+}
+
+let reviewerNamesReady = false;
+/** True once migration 0007 has added the reviewer_name column. */
+async function hasReviewerNames(env: Env): Promise<boolean> {
+  if (reviewerNamesReady) return true;
+  try { await env.DB.prepare("SELECT reviewer_name FROM reviews LIMIT 1").first(); reviewerNamesReady = true; } catch { /* not yet */ }
+  return reviewerNamesReady;
 }
 
 async function getReview(env: Env, id: string): Promise<ReviewRow | null> {
@@ -101,7 +113,7 @@ async function reviewDetail(env: Env, user: User, id: string) {
       ? "This review wasn't sent to you, so it can't be opened here. Ask the person who sent it, or an admin, for access."
       : "Review not found.", 404);
   }
-  if (user.role === "link") { r.draft = null; r.route_reason = null; r.risk_flags = null; }
+  if (user.role === "link") { r.draft = null; r.route_reason = null; r.risk_flags = null; (r as any).reviewer_name = null; }
   const events = (await env.DB.prepare("SELECT actor, action, detail, at FROM events WHERE review_id = ? ORDER BY id DESC LIMIT 50").bind(id).all()).results;
   let escalation: any = { ready: false };
   try {
@@ -436,9 +448,27 @@ async function staffApi(env: Env, user: User, req: Request, path: string, url: U
     const op = String(body?.op || "");
     if (op === "add") {
       const r = await getReview(env, String(body?.review_id || ""));
-      const s = await env.DB.prepare("SELECT * FROM staff WHERE id = ?").bind(Number(body?.staff_id)).first<Staff>();
       if (!r || !canSee(user, r.rooftop_key)) return fail("Review not found.", 404);
+      let s: Staff | null = null;
+      const newName = String(body?.full_name ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
+      if (newName) {
+        // Tag someone who isn't on the roster yet: add them to this store, then tag
+        const existing = (await env.DB.prepare("SELECT * FROM staff WHERE rooftop_key = ?").bind(r.rooftop_key).all<Staff>()).results
+          .find((x) => norm(x.full_name) === norm(newName));
+        if (existing) s = existing;
+        else {
+          const role = ["sales", "service", "other"].includes(String(body?.role)) ? String(body?.role) : "sales";
+          await env.DB.prepare("INSERT INTO staff (rooftop_key, full_name, role, aliases, created_at) VALUES (?,?,?,?,?)")
+            .bind(r.rooftop_key, newName, role, "", nowIso()).run();
+          s = await env.DB.prepare("SELECT * FROM staff WHERE rooftop_key = ? AND full_name = ? ORDER BY id DESC LIMIT 1").bind(r.rooftop_key, newName).first<Staff>();
+          await rematch(env, r.rooftop_key);
+        }
+      } else {
+        s = await env.DB.prepare("SELECT * FROM staff WHERE id = ?").bind(Number(body?.staff_id)).first<Staff>();
+      }
       if (!s || s.rooftop_key !== r.rooftop_key) return fail("Pick someone from this store's roster.");
+      const already = await env.DB.prepare("SELECT 1 AS x FROM mentions WHERE review_id = ? AND staff_id = ? AND match IN ('auto','manual')").bind(r.id, s.id).first();
+      if (already) return fail(`${s.full_name} is already tagged on this review.`);
       await env.DB.prepare(`INSERT INTO mentions (review_id, rooftop_key, review_time, stars, name_raw, role_hint, sentiment, staff_id, match, tagged_by, tagged_at)
         VALUES (?,?,?,?,?,?,?,?, 'manual', ?, ?)`).bind(r.id, r.rooftop_key, r.create_time, r.stars, s.full_name, s.role, "neutral", s.id, user.email, nowIso()).run();
       await logEvent(env, r.id, user.email, "staff_tagged", `Added ${s.full_name}`);

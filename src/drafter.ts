@@ -25,12 +25,23 @@ function failed(reason: string): DraftResult {
   return { ok: false, department: "general", sentiment: "unknown", risk_level: "high", risk_flags: [reason], reply: "" };
 }
 
-export async function draftReply(env: Env, stars: number, text: string, rooftop: Rooftop, budget: Budget = unlimited()): Promise<DraftResult> {
+/** A usable first name from a Google display name, or "" (anonymous, initials, business names, "A Google User"). */
+export function firstName(display: string | null | undefined): string {
+  const name = String(display || "").trim();
+  if (!name || /google user|anonymous|\d|llc|inc\b|corp|auto|motors|group/i.test(name)) return "";
+  const first = name.split(/\s+/)[0].replace(/[^A-Za-z'\-]/g, "");
+  if (first.length < 2 || first.length > 20 || first === first.toUpperCase() && first.length <= 3) return "";
+  // Keep mixed-case names as written (Mary-Kate, DeShawn); tidy all-caps or all-lowercase ones
+  if (first !== first.toUpperCase() && first !== first.toLowerCase()) return first;
+  return first.toLowerCase().replace(/(^|[-'])([a-z])/g, (_, sep, c) => sep + c.toUpperCase());
+}
+
+export async function draftReply(env: Env, stars: number, text: string, rooftop: Rooftop, budget: Budget = unlimited(), reviewerName?: string | null): Promise<DraftResult> {
   if (!env.ANTHROPIC_API_KEY) return failed("ANTHROPIC_API_KEY is not set");
   budget.take();
   const payload = {
     rooftop: { name: rooftop.name, brand: rooftop.brand, town: rooftop.town, phone: rooftop.phone, contacts: rooftop.contacts, signoff: rooftop.signoff },
-    review: { stars, text: text || "(rating only, no text)" },
+    review: { stars, text: text || "(rating only, no text)", reviewer_first_name: firstName(reviewerName) || null },
   };
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {

@@ -38,7 +38,7 @@ Anonymize them: remove every customer name, and replace employee names with [tea
 End each example with a sign-off line in the form "The Lester Glenn [Store] Team".
 
 Rules for what you write:
-- The drafting assistant never knows the reviewer's name, so don't tell it to greet by name.
+- The drafting assistant is given the reviewer's first name when Google provides one. If the team greets reviewers by first name, say so; never use last names.
 - Where the team's habits conflict with the non-negotiable rules below, follow the rules
   and don't describe the conflicting habit.
 - Don't invent policies, phone numbers, staff names, hours, or promotions.

@@ -39,8 +39,9 @@ reply is posted under a specific rooftop, given to you as \`rooftop\`.
 
 ## Privacy (strict)
 
-- Never address the reviewer by name and never repeat any customer details
-  (names, phone numbers, emails, vehicle identifiers, addresses) from the review.
+- Greet the reviewer by first name when review.reviewer_first_name is given
+  ("Hi Sarah,"). Never use their last name, and never repeat any other customer
+  details (phone numbers, emails, vehicle identifiers, addresses) from the review.
 - Never reference information that is not in the review itself.
 
 ## Always
@@ -71,7 +72,7 @@ The Lester Glenn Ford Team"
 // Rules that always apply on top of whatever guidelines are saved in the
 // dashboard, so a learned or edited version can never drop them.
 export const SAFETY_RULES = `## Non-negotiable rules (these override anything above)
-- Never address the reviewer by name and never repeat customer details (names, phone numbers, emails, vehicle identifiers, addresses).
+- Only greet the reviewer by the first name in review.reviewer_first_name, and only if it's given. Never use their last name, and never repeat other customer details (phone numbers, emails, vehicle identifiers, addresses).
 - Never admit fault or liability, and never discuss specifics of a deal, repair, price, payment, or warranty claim in public.
 - Never promise refunds, discounts, free service, or any specific outcome.
 - Never invent facts about the dealership, staff, hours, phone numbers, or promotions. Only use a phone number if rooftop.phone provides one.

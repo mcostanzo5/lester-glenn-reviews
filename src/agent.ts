@@ -62,6 +62,9 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
       status, g.reply_text, g.reply_time, replySource, nowIso());
   });
   await env.DB.batch(writes);
+  // Reviewer names are saved separately so syncing keeps working if migration 0007 hasn't been run yet
+  try { await env.DB.batch(reviews.map((g) => env.DB.prepare("UPDATE reviews SET reviewer_name = ? WHERE id = ?").bind(g.reviewer_name, g.id))); }
+  catch { /* reviewer_name column not added yet */ }
   // If a customer edited their review text, read it again for staff names
   const edited = reviews.filter((g) => existing.has(g.id) && existing.get(g.id)!.text !== g.text);
   if (edited.length) {
@@ -161,7 +164,7 @@ async function backfill(env: Env, client: GBPClient, locs: Loc[], budget: Budget
 
 /** Draft one review and save the result. Returns the new status. */
 export async function draftAndRoute(env: Env, r: ReviewRow, actor = "agent", forceReview = false, budget: Budget = unlimited()): Promise<Status> {
-  const d = await draftReply(env, r.stars, r.text, rooftopByKey(r.rooftop_key), budget);
+  const d = await draftReply(env, r.stars, r.text, rooftopByKey(r.rooftop_key), budget, (r as any).reviewer_name);
   const decision = route(r.stars, r.text, d, num(env.AUTO_POST_MIN_STARS, 4));
   const status: Status = forceReview || decision.action === "review" ? "pending" : "ready";
   await env.DB.prepare(
@@ -197,6 +200,11 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
       try {
         client = new GBPClient(env, budget);
         locs = await loadLocations(env, client);
+        if (!locs.length) {
+          s.notes.push("Google returned no business locations for this sign-in. The refresh token was probably created with a Google account that doesn't manage the Lester Glenn profiles; create it again signed in as the profile owner or manager.");
+        } else {
+          s.notes.push(`Found ${locs.length} Google ${locs.length === 1 ? "location" : "locations"}.`);
+        }
         s.synced += await syncNew(env, client, locs, budget, s.notes);
       } catch (e) {
         if (e instanceof BudgetExhausted) throw e;

@@ -19,9 +19,11 @@ export interface GReview {
   update_time: string;
   reply_text: string | null;
   reply_time: string | null;
+  reviewer_name: string | null;
 }
 
-/** Only what the dashboard needs. The reviewer's name is deliberately dropped. */
+/** What the dashboard needs, including the reviewer's display name (approved by Matt Costanzo
+ *  per company PII policy). Anonymous reviewers have no name. */
 function normalize(raw: any): GReview {
   return {
     id: raw.name,
@@ -31,6 +33,7 @@ function normalize(raw: any): GReview {
     update_time: iso(raw.updateTime || raw.createTime),
     reply_text: raw.reviewReply?.comment ?? null,
     reply_time: raw.reviewReply ? iso(raw.reviewReply.updateTime) : null,
+    reviewer_name: raw.reviewer?.isAnonymous ? null : String(raw.reviewer?.displayName || "").trim().slice(0, 120) || null,
   };
 }
 

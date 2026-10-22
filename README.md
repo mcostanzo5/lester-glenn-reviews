@@ -260,8 +260,12 @@ everyone out once, which is expected.
 
 ## Privacy and safety
 
-- Reviewer names are dropped the moment a review is read and are never stored,
-  sent to Claude, or shown in the dashboard.
+- Reviewer names (as Google shows them) are stored and shown to people with
+  dashboard access, and are searchable in All reviews. Claude only receives the
+  reviewer's first name, to greet them in replies. Anonymous reviewers and
+  business names get no greeting by name. People opening a review from an
+  escalation email don't see the reviewer's name. Approved by Matt Costanzo per
+  company PII policy. Setup: run `migrations/0007_reviewer_names.sql`.
 - A review that already has a reply in Google is never replied to again.
 - Nothing auto-posts unless the keyword check and Claude's risk rating both clear it.
 - Every draft, edit, approval, dismissal, and post is recorded in the review's history.

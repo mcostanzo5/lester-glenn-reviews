@@ -13,7 +13,7 @@ export interface Rooftop {
 const store: Record<string, string> = { sales: "our Sales Manager", service: "our Service Manager", parts: "our Parts Manager", finance: "our Finance Manager" };
 
 function rt(key: string, name: string, brand: string, town: string, matchAll: string[], matchAny?: string[], contacts: Record<string, string> = store): Rooftop {
-  return { key, name, brand, town, phone: "", signoff: `The ${name} Team`, contacts, matchAll, matchAny };
+  return { key, name, brand, town, phone: "", signoff: key === "group" ? "The Lester Glenn Team" : `The ${name} Team`, contacts, matchAll, matchAny };
 }
 
 // Matched in order against each Google location title; first match wins.
@@ -30,6 +30,10 @@ export const ROOFTOPS: Rooftop[] = [
   rt("hyundai", "Lester Glenn Hyundai", "Hyundai", "Toms River", ["hyundai"]),
   rt("mazda", "Lester Glenn Mazda", "Mazda", "Toms River", ["mazda"]),
   rt("subaru", "Lester Glenn Subaru", "Subaru", "Toms River", ["subaru"]),
+  // The group-level Google listing. Reviewers here often can't be tied to one store,
+  // so replies point them to Customer Care.
+  rt("group", "Lester Glenn Auto Group", "", "", ["auto group"], undefined,
+    { general: "our Customer Care team at customercare@lesterglenn.com", sales: "our Customer Care team at customercare@lesterglenn.com", service: "our Customer Care team at customercare@lesterglenn.com" }),
 ];
 
 export const DEFAULT_ROOFTOP: Rooftop = {

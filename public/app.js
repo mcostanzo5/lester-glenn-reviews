@@ -187,7 +187,7 @@ function filtersHtml() {
     <label class="sr" for="fStars">Rating</label>
     <select id="fStars">${opt("", "Any rating", f.stars)}${opt("low", "3 stars or less", f.stars)}${opt("high", "4 and 5 stars", f.stars)}</select>
     <label class="sr" for="fQ">Search</label>
-    <input type="search" id="fQ" placeholder="Search review and reply text" value="${esc(f.q)}">
+    <input type="search" id="fQ" placeholder="Search reviews, replies, and reviewer names" value="${esc(f.q)}">
   </form>`;
 }
 
@@ -247,7 +247,7 @@ function rowHtml(r) {
     : `${ago(r.create_time)}<br>${pill(r.status, r.is_sample)}${r.escalation_count ? ` <span class="pill esc" title="Emails sent to the team about this review">\u2709 ${r.escalation_count}</span>` : ""}`;
   return `<div class="row-wrap${quick ? " has-quick" : ""}${resolveBtn ? " has-resolve" : ""}"><button class="row" data-id="${esc(r.id)}" aria-current="${state.selected === r.id}">
     <div class="stars-col">${stars(r.stars)}</div>
-    <div><div class="store">${esc(shortName(r.rooftop_key))}</div><div class="excerpt${r.text ? "" : " empty"}">${text}</div></div>
+    <div><div class="store">${esc(shortName(r.rooftop_key))}${r.reviewer_name ? ` <span class="reviewer">${esc(r.reviewer_name)}</span>` : ""}</div><div class="excerpt${r.text ? "" : " empty"}">${text}</div></div>
     <div class="when">${when}</div>
   </button>${resolveBtn}${quick}</div>`;
 }
@@ -322,7 +322,7 @@ function renderDetail(data) {
 
   $("#detail").innerHTML = `
     <div class="detail-head">
-      <div><h2>${esc(storeName(r.rooftop_key))}</h2><p class="meta">${new Date(r.create_time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</p></div>
+      <div><h2>${esc(storeName(r.rooftop_key))}</h2><p class="meta">${r.reviewer_name ? `<b class="reviewer-name">${esc(r.reviewer_name)}</b>, ` : ""}${new Date(r.create_time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</p></div>
       <div class="head-actions">
         ${canAct && escalation && escalation.ready && escalation.teams ? `<button class="btn escalate" id="escalateBtn">${r.escalation_open ? "Follow up" : "Escalate"}</button>` : ""}
         ${linkOnly ? "" : `<button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button>`}
@@ -574,7 +574,15 @@ function staffBlock(st) {
   }).join("");
   const body = !st.scanned && !st.mentions.length ? `<p class="meta">Not read for staff names yet. It happens on the next agent run, or from the Staff tab.</p>`
     : items ? `<ul class="staff-list">${items}</ul>` : `<p class="meta">No employees named in this review.</p>`;
-  const add = st.canTag && st.roster.length ? `<div class="add-row" style="margin-top:8px"><select id="addStaff"><option value="">Tag someone Claude missed\u2026</option>${rosterOpts(null)}</select></div>` : "";
+  const add = st.canTag ? `<div class="tag-add">
+      <select id="addStaff" aria-label="Tag an employee">
+        <option value="">${st.mentions.some((m) => m.match !== "ignored") ? "Tag another employee\u2026" : "Tag an employee\u2026"}</option>
+        ${rosterOpts(null)}<option value="new">+ Someone not on the roster\u2026</option></select>
+      <div id="newStaff" class="new-staff" hidden>
+        <input id="newStaffName" placeholder="Full name" autocomplete="off">
+        <select id="newStaffRole"><option value="sales">Sales</option><option value="service">Service</option><option value="other">Other</option></select>
+        <button class="btn primary" id="newStaffAdd">Add and tag</button>
+      </div></div>` : "";
   return `<div class="esc-block"><h3>Staff mentioned</h3>${body}${add}</div>`;
 }
 
@@ -588,7 +596,19 @@ function bindStaffBlock(r, st) {
   $("#detail").querySelectorAll("[data-ignore]").forEach((b) => (b.onclick = () => call({ op: "ignore", mention_id: +b.dataset.ignore }, "Marked as not an employee")));
   $("#detail").querySelectorAll("[data-untag]").forEach((b) => (b.onclick = () => call({ op: "remove", mention_id: +b.dataset.untag }, "Tag removed")));
   const add = $("#addStaff");
-  if (add) add.onchange = () => add.value && call({ op: "add", review_id: r.id, staff_id: +add.value }, "Tagged");
+  if (!add) return;
+  add.onchange = () => {
+    $("#newStaff").hidden = add.value !== "new";
+    if (add.value === "new") return $("#newStaffName").focus();
+    if (add.value) call({ op: "add", review_id: r.id, staff_id: +add.value }, "Tagged");
+  };
+  const addNew = () => {
+    const name = $("#newStaffName").value.trim();
+    if (!name) return toast("Enter their full name.", true);
+    call({ op: "add", review_id: r.id, full_name: name, role: $("#newStaffRole").value }, `Added ${name} to the roster and tagged`);
+  };
+  $("#newStaffAdd").onclick = addNew;
+  $("#newStaffName").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); addNew(); } };
 }
 
 /* ---------- Staff tab ---------- */

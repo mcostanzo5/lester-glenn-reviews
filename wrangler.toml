@@ -12,7 +12,7 @@ run_worker_first = true
 [[d1_databases]]
 binding = "DB"
 database_name = "lester-glenn-reviews"
-database_id = "ee207814-a254-4b70-9098-a9835b36efd9"
+database_id = "REPLACE_WITH_DATABASE_ID"
 migrations_dir = "migrations"
 
 # Cloudflare schedules in UTC, which doesn't change for daylight saving. The
@@ -25,10 +25,10 @@ crons = ["0 0,1,12,13,16,17,20,21 * * *"]
 
 [vars]
 # dry_run: sample data only | shadow: reads Google, never posts | live: posts replies
-AGENT_MODE = "shadow"
-# Microsoft 365 sign-in, from the Entra app registration
-MS_TENANT_ID = "cebd3ada-40a6-4d78-b4ca-02472b1b7d7b"
-MS_CLIENT_ID = "ffed32c7-e735-4e6f-9ab9-97b89a2c5e32"
+AGENT_MODE = "dry_run"
+# Microsoft 365 sign-in, from the Entra app registration (see README)
+MS_TENANT_ID = ""
+MS_CLIENT_ID = ""
 # Only these domains can receive escalation emails
 MAIL_ALLOWED_DOMAINS = "lesterglenn.com"
 # Always admins, even before anyone is added in Settings
@@ -42,6 +42,7 @@ CLAUDE_MODEL = "claude-sonnet-5"
 # Hours (24h, Eastern) when scheduled runs happen
 RUN_HOURS_ET = "8,12,16,20"
 # Max Google + Claude calls per run. Free plan limit is 50; keep 45 there.
+# On Workers Paid, raise to 900 so the history import finishes faster.
 EXTERNAL_REQUEST_BUDGET = "45"
 # Pages of older reviews (50 each) imported per run for statistics
 BACKFILL_PAGES_PER_RUN = "20"
