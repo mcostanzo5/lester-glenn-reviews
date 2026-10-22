@@ -40,6 +40,19 @@ function visibleRooftops(user: User) {
   return user.rooftops === "*" ? all : all.filter((r) => (user.rooftops as string[]).includes(r.key));
 }
 
+/** Next top-of-hour that falls on one of RUN_HOURS_ET in New York. */
+function nextScheduledRun(hours = "8,12,16,20"): string | null {
+  const wanted = hours.split(",").map((h) => Number(h.trim()));
+  const fmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hourCycle: "h23" });
+  const t = new Date();
+  t.setUTCMinutes(0, 0, 0);
+  for (let i = 1; i <= 48; i++) {
+    const c = new Date(t.getTime() + i * 3600_000);
+    if (wanted.includes(Number(fmt.format(c)))) return c.toISOString();
+  }
+  return null;
+}
+
 async function me(env: Env, user: User) {
   const s = scope(user, env);
   const counts = (await env.DB.prepare(
@@ -51,8 +64,12 @@ async function me(env: Env, user: User) {
     escalations = (await env.DB.prepare(`SELECT COUNT(*) AS n FROM reviews WHERE ${s.sql} AND escalation_open > 0`)
       .bind(...s.args).first<{ n: number }>())?.n ?? 0;
   } catch { /* escalation columns not added yet */ }
+  const lastRun = await env.DB.prepare("SELECT finished_at, trigger, errors FROM runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1")
+    .first<{ finished_at: string; trigger: string; errors: number }>();
   return json({
     email: user.email, name: user.name, role: user.role, canReply: user.canReply, mode: mode(env), escalations,
+    lastRun: lastRun ? { at: lastRun.finished_at, manual: lastRun.trigger.startsWith("manual"), errors: lastRun.errors } : null,
+    nextRun: mode(env) === "dry_run" ? null : nextScheduledRun(env.RUN_HOURS_ET),
     approvers: (env.REPLY_APPROVERS || "").split(",").map((e) => e.trim()).filter(Boolean),
     storeNames: Object.fromEntries([...ROOFTOPS, DEFAULT_ROOFTOP].map((r) => [r.key, r.name])),
     rooftops: visibleRooftops(user).map((r) => ({ ...r, open: map[r.key] || 0 })),

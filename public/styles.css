@@ -47,6 +47,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .brand-mark::after { content: ""; position: absolute; inset: 4px; border-radius: 50%; background: #fff; }
 .mode-chip { font-size: 13px; font-weight: 600; padding: 3px 10px; border-radius: 999px; background: rgba(255,255,255,.18); }
 .mode-chip.live { background: #fff; color: var(--green); }
+.run-status { font-size: 13px; opacity: .92; white-space: nowrap; }
+.run-status .run-err { color: #ffd2c9; font-weight: 700; }
+@media (max-width: 1000px) { .run-status .run-next { display: none; } }
+@media (max-width: 760px) { .run-status { display: none; } }
 .who { margin-left: auto; font-size: 14px; opacity: .9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who .signout { color: #fff; margin-left: 10px; font-weight: 600; }
 .banner { background: var(--blue-wash); color: var(--blue-deep); padding: 9px 20px; font-size: 14px; font-weight: 500; border-bottom: 1px solid var(--line); }

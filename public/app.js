@@ -93,6 +93,7 @@ async function boot() {
   chip.hidden = false;
   chip.textContent = { dry_run: "Dry run", shadow: "Shadow mode", live: "Live" }[m.mode];
   chip.classList.toggle("live", m.mode === "live");
+  renderRunStatus();
   const banner = $("#banner");
   if (m.mode === "dry_run") { banner.hidden = false; banner.textContent = "Dry run: showing sample reviews. Nothing is read from or posted to Google."; }
   if (m.mode === "shadow") { banner.hidden = false; banner.textContent = "Shadow mode: these are real reviews, but no replies are posted to Google yet."; }
@@ -137,8 +138,30 @@ function renderRail() {
     stores.map((r) => `<option value="${esc(r.key)}" ${state.rooftop === r.key ? "selected" : ""}>${esc(r.name)} (${r.open})</option>`).join("");
 }
 
+const ET = "America/New_York";
+const etDay = (d) => d.toLocaleDateString("en-US", { timeZone: ET });
+function whenLabel(iso) {
+  const d = new Date(iso), now = Date.now();
+  const time = d.toLocaleTimeString(undefined, { timeZone: ET, hour: "numeric", minute: "2-digit" });
+  if (etDay(d) === etDay(new Date(now))) return `today ${time}`;
+  if (etDay(d) === etDay(new Date(now - 86400000))) return `yesterday ${time}`;
+  if (etDay(d) === etDay(new Date(now + 86400000))) return `tomorrow ${time}`;
+  return d.toLocaleString(undefined, { timeZone: ET, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function renderRunStatus() {
+  const el = $("#runStatus"), m = state.me;
+  if (!el || m.role === "link") return;
+  const last = m.lastRun
+    ? `Last run ${whenLabel(m.lastRun.at)}${m.lastRun.errors ? ` <span class="run-err">(${m.lastRun.errors} error${m.lastRun.errors === 1 ? "" : "s"})</span>` : ""}`
+    : "No runs yet";
+  el.innerHTML = last + (m.nextRun ? ` <span class="run-next">\u00b7 Next ${whenLabel(m.nextRun)}</span>` : "");
+  el.title = m.lastRun ? `Last run finished ${new Date(m.lastRun.at).toLocaleString(undefined, { timeZone: ET })} Eastern${m.lastRun.manual ? " (started by hand)" : " (scheduled)"}` : "";
+  el.hidden = false;
+}
+
 async function refreshCounts() {
-  try { state.me = await api("/api/me"); renderRail(); } catch { /* keep old counts */ }
+  try { state.me = await api("/api/me"); renderRail(); renderRunStatus(); } catch { /* keep old counts */ }
 }
 
 function setRooftop(key) {
@@ -918,7 +941,7 @@ async function renderSettings() {
       <td>${u.rooftops === "*" ? "All stores" : u.rooftops.split(",").map(storeName).map((n) => esc(n.replace(/^Lester Glenn /, ""))).join(", ")}</td>
       <td class="num"><button class="btn quiet danger" data-remove="${esc(u.email)}">Remove</button></td></tr>`).join("");
 
-  const runRows = runs.runs.map((r) => `<tr><td>${ago(r.started_at)}</td><td>${esc(r.trigger.replace(/^manual:.*/, "Manual"))}</td>
+  const runRows = runs.runs.map((r) => `<tr><td>${new Date(r.started_at).toLocaleString(undefined, { timeZone: ET, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} <span class="meta">(${ago(r.started_at)})</span></td><td>${esc(r.trigger.replace(/^manual:.*/, "Manual"))}</td>
     <td class="num">${r.synced}</td><td class="num">${r.drafted}</td><td class="num">${r.flagged}</td><td class="num">${r.posted}</td>
     <td class="num ${r.errors ? "late" : ""}">${r.errors}</td></tr>${r.notes ? `<tr><td colspan="7" class="meta" style="white-space:pre-wrap">${esc(r.notes)}</td></tr>` : ""}`).join("");
 
@@ -978,7 +1001,7 @@ async function renderSettings() {
     const b = e.target; b.disabled = true; b.textContent = "Running\u2026";
     try {
       const r = await api("/api/admin/run", { method: "POST" });
-      toast(`Run finished: ${r.drafted} drafted, ${r.flagged} flagged, ${r.posted} posted`);
+      toast(`Run finished: ${r.synced} synced, ${r.drafted} drafted, ${r.flagged} flagged, ${r.posted} posted`);
       await refreshCounts(); renderSettings();
     } catch (err) { toast(err.message, true); b.disabled = false; b.textContent = "Run agent now"; }
   };
