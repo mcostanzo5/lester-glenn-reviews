@@ -149,8 +149,10 @@ body.link-mode .detail { position: static; max-width: 760px; margin: 24px auto; 
 .esc-details .lbl { font-weight: 700; margin: 0 0 6px; }
 .esc-details dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; margin: 0 0 8px; font-size: 15px; }
 .esc-details dt { color: var(--muted); }
-.esc-details dd { margin: 0; font-weight: 500; }
-.esc-details .last-note { background: var(--panel); margin: 8px 0 0; }
+.esc-details dd { margin: 0; font-weight: 500; white-space: pre-wrap; }
+.esc-details .unknown-check { font-weight: 600; margin: 4px 0 10px; }
+.unknown-note { background: var(--blue-wash); color: var(--blue-deep); border-radius: var(--radius-s); padding: 8px 10px; }
+.last-note { background: var(--panel); margin: 8px 0 0; }
 .sent-list { list-style: none; padding: 0; margin: 8px 0; font-size: 14px; }
 .sent-list li { padding: 5px 0; border-bottom: 1px solid var(--line); }
 .sent-list li:last-child { border-bottom: 0; }
@@ -169,6 +171,15 @@ body.link-mode .detail { position: static; max-width: 760px; margin: 24px auto; 
 .manual-esc + .who { margin-left: 16px; }
 .pill.source { background: var(--ink); color: var(--panel); margin-left: 6px; }
 @media (max-width: 760px) { .manual-esc { padding: 5px 8px; font-size: 13px; } }
+
+/* Removed reviews and Auto Group reassignment */
+.removed-note { background: var(--paper); border-left: 4px solid var(--muted); padding: 10px 12px; border-radius: var(--radius-s); color: var(--ink); }
+.status-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.status-row .btn { padding: 3px 8px; font-size: 13px; }
+.reassign { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: var(--blue-wash); border-radius: var(--radius-s); padding: 8px 10px; margin: 0 0 10px; font-size: 14px; }
+.reassign span { flex-basis: 100%; }
+.reassign select { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius-s); padding: 5px 8px; font-size: 14px; }
+.reassign .btn { padding: 5px 10px; font-size: 14px; }
 
 /* Management notes */
 .notes { list-style: none; padding: 0; margin: 6px 0 10px; }

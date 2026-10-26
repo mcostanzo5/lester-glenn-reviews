@@ -20,6 +20,7 @@ const FIELD_LABEL: Record<string, string> = {
   dms: "Client / DMS #", client: "Client name",
   salesperson: "Salesperson", deal: "Deal #", dealDate: "Deal date",
   ro: "RO #", roDate: "RO date", advisor: "Service advisor",
+  details: "Other details",
 };
 
 export const FIELDS_FOR: Record<Concern, string[]> = {
@@ -66,24 +67,28 @@ export interface EscalationInput {
   fields: Record<string, string>;
   note: string;
   recipients: string[];
+  unknown: boolean; // "We don't know who left this": the email says so and lists what we do know
 }
 
 /** Validates the form. Returns cleaned input or an error message. */
 export function parseEscalation(env: Env, body: any): { input?: EscalationInput; error?: string } {
   const concern = body?.concern as Concern;
   if (!FIELDS_FOR[concern]) return { error: "Pick what kind of concern this is." };
+  const unknown = !!body?.unknown;
   const fields: Record<string, string> = {};
-  for (const k of FIELDS_FOR[concern]) {
-    const v = String(body?.fields?.[k] ?? "").trim().slice(0, 120);
+  for (const k of [...FIELDS_FOR[concern], ...(unknown ? ["details"] : [])]) {
+    const v = String(body?.fields?.[k] ?? "").trim().slice(0, k === "details" ? 1500 : 120).replace(/\s*\u2014\s*/g, ", ");
     if (v) fields[k] = v;
   }
   const note = String(body?.note ?? "").trim().slice(0, 4000).replace(/\s*\u2014\s*/g, ", ");
-  if (!Object.keys(fields).length && !note) return { error: "Add a note, or the customer details, so the team knows what to do." };
+  if (!Object.keys(fields).length && !note) {
+    return { error: unknown ? "Add whatever information you have, or a note, so the team knows where to start." : "Add a note, or the customer details, so the team knows what to do." };
+  }
   const { ok, bad } = checkAddresses(env, body?.recipients);
   if (bad.length) return { error: `These addresses can't be used: ${bad.join(", ")}. Only company addresses are allowed.` };
   if (!ok.length) return { error: "Add at least one person to send this to." };
   if (ok.length > MAX_RECIPIENTS) return { error: `That's more than ${MAX_RECIPIENTS} people. Narrow the list.` };
-  return { input: { concern, fields, note, recipients: ok } };
+  return { input: { concern, fields, note, recipients: ok, unknown } };
 }
 
 export function buildEmail(r: ReviewRow, input: EscalationInput, sender: User, origin: string, sentAt: string) {
@@ -109,7 +114,7 @@ export function buildEmail(r: ReviewRow, input: EscalationInput, sender: User, o
   const heading = (text: string) => `<p style="${F}font-size:17px;line-height:24px;font-weight:bold;color:#1f2933;margin:0 0 8px">${text}</p>`;
 
   const customerRows = Object.entries(input.fields)
-    .map(([k, v]) => row(FIELD_LABEL[k], esc(k.endsWith("Date") ? plainDate(v) : v), k === "client"))
+    .map(([k, v]) => row(FIELD_LABEL[k], k === "details" ? `<span style="white-space:pre-wrap">${esc(v)}</span>` : esc(k.endsWith("Date") ? plainDate(v) : v), k === "client"))
     .join("");
 
   const html = `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;padding:0;background:#f3f5f8;${F}">
@@ -126,11 +131,14 @@ export function buildEmail(r: ReviewRow, input: EscalationInput, sender: User, o
   </tr></table>
 </td></tr>
 <tr><td style="padding:16px 24px 24px;${F}">
-  ${customerRows ? `${heading("We believe the customer that left the review is:")}
+  ${input.unknown ? `${heading("We have been unable to find the customer associated with this review. Here is the information we have:")}
+  ${customerRows ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 22px">${customerRows}</table>`
+    : `<p style="${T}margin:0 0 22px">Only what's in the review below.</p>`}`
+  : customerRows ? `${heading("We believe the customer that left the review is:")}
   <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 22px">${customerRows}</table>` : ""}
   ${input.note ? `${heading(`Note from ${esc(sender.name || sender.email)}:`)}
   <div style="${T}white-space:pre-wrap;margin:0 0 22px">${esc(input.note)}</div>` : ""}
-  ${heading(`The review${(r as any).source ? ` (posted on ${esc((r as any).source)})` : ""}`)}
+  ${heading(`The review${(r as any).source ? ` (posted on ${esc((r as any).source)})` : (r as any).rooftop_override ? ` (posted on the ${esc(r.location_title || "Lester Glenn Auto Group")} Google listing)` : ""}`)}
   ${(r as any).source_url ? `<p style="${F}font-size:14px;line-height:20px;margin:-4px 0 8px"><a href="${esc((r as any).source_url)}" style="color:#0772bc">View it on ${esc((r as any).source)}</a></p>` : ""}
   <div style="${T}background:#f3f5f8;border-left:4px solid #e39b12;padding:12px 16px;margin:0 0 22px;white-space:pre-wrap">${r.text ? esc(r.text) : "<em>Rating only, no written review</em>"}</div>
   <table role="presentation" cellpadding="0" cellspacing="0" style="border-top:1px solid #dbe1e8;width:100%">
@@ -157,7 +165,7 @@ export async function sendEscalation(env: Env, r: ReviewRow, input: EscalationIn
   const email = buildEmail(r, input, user, origin, sentAt);
   await sendAs(env, user.email, { to: input.recipients, subject: email.subject, html: email.html });
   const followups = r.escalation_open ?? 0;
-  const details = await encryptText(env, JSON.stringify({ concern: input.concern, fields: input.fields, note: input.note, recipients: input.recipients }));
+  const details = await encryptText(env, JSON.stringify({ concern: input.concern, fields: input.fields, note: input.note, recipients: input.recipients, unknown: input.unknown }));
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO escalations (review_id, concern, recipients, included_customer, followup_number, sent_by, sent_at) VALUES (?,?,?,?,?,?,?)`)
       .bind(r.id, input.concern, input.recipients.join(","), Object.keys(input.fields).length ? 1 : 0, followups, user.email, sentAt),
@@ -174,7 +182,7 @@ export async function resolveEscalation(env: Env, r: ReviewRow, user: User) {
 }
 
 /** The last escalation's details for pre-filling a follow-up, or null. */
-export async function lastEscalation(env: Env, r: ReviewRow): Promise<{ concern: Concern; fields: Record<string, string>; note: string; recipients: string[] } | null> {
+export async function lastEscalation(env: Env, r: ReviewRow): Promise<{ concern: Concern; fields: Record<string, string>; note: string; recipients: string[]; unknown?: boolean } | null> {
   const raw = await decryptText(env, (r as any).escalation_details);
   if (!raw) return null;
   try { return JSON.parse(raw); } catch { return null; }

@@ -61,6 +61,13 @@ export function rooftopFor(key: string, listingTitle?: string | null): Rooftop {
   return { ...r, name, signoff: "The Lester Glenn Team" };
 }
 
+/** Who the reply comes from: the Google listing the review is on, even if it was moved
+ *  to a specific store for tracking (reassigned Auto Group reviews). */
+export function replyRooftop(r: { rooftop_key: string; location_title?: string | null; rooftop_override?: string | null }): Rooftop {
+  if (r.rooftop_override && r.location_title) return rooftopFor(matchRooftop(r.location_title).key, r.location_title);
+  return rooftopFor(r.rooftop_key, r.location_title);
+}
+
 export function rooftopByKey(key: string): Rooftop {
   return ROOFTOPS.find((r) => r.key === key) || DEFAULT_ROOFTOP;
 }

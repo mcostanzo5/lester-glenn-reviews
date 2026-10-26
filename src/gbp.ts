@@ -9,7 +9,9 @@ const REVIEWS_URL = (a: string, l: string) => `https://mybusiness.googleapis.com
 const REPLY_URL = (r: string) => `https://mybusiness.googleapis.com/v4/${r}/reply`;
 const STARS: Record<string, number> = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 };
 
-export class GBPError extends Error {}
+export class GBPError extends Error {
+  constructor(message: string, public status?: number) { super(message); }
+}
 
 export interface GReview {
   id: string;
@@ -82,9 +84,9 @@ export class GBPClient {
       if (res.status === 429 || res.status >= 500) {
         if (attempt < 3 && this.budget.has(1)) { await new Promise((r) => setTimeout(r, delay)); delay *= 2; continue; }
         const hint = res.status === 429 ? " A steady 429 usually means Google has not approved API access yet." : "";
-        throw new GBPError(`${method} failed (${res.status}).${hint}`);
+        throw new GBPError(`${method} failed (${res.status}).${hint}`, res.status);
       }
-      if (!res.ok) throw new GBPError(`${method} ${url} failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
+      if (!res.ok) throw new GBPError(`${method} ${url} failed (${res.status}): ${(await res.text()).slice(0, 200)}`, res.status);
       const text = await res.text();
       return text ? JSON.parse(text) : {};
     }
@@ -112,6 +114,13 @@ export class GBPClient {
     if (pageToken) q.set("pageToken", pageToken);
     const data = await this.call("GET", `${REVIEWS_URL(account, location)}?${q}`);
     return { reviews: (data.reviews || []).map(normalize), next: data.nextPageToken || null };
+  }
+
+  /** Is this review still on Google? false only when Google says it's gone (404). */
+  async reviewExists(reviewId: string): Promise<boolean> {
+    if (!reviewId.startsWith("accounts/")) return true;
+    try { await this.call("GET", `https://mybusiness.googleapis.com/v4/${reviewId}`); return true; }
+    catch (e) { if (e instanceof GBPError && e.status === 404) return false; throw e; }
   }
 
   async postReply(reviewId: string, text: string): Promise<void> {

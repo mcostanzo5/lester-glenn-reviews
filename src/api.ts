@@ -2,9 +2,9 @@ import type { Env, ReviewRow, User } from "./types";
 import { autoPost, mode, nowIso } from "./types";
 import { canAct, canSee, wasRecipient } from "./auth";
 import { ROOFTOPS, DEFAULT_ROOFTOP } from "./rooftops";
-import { GBPClient } from "./gbp";
+import { GBPClient, GBPError } from "./gbp";
 import { cleanReply } from "./drafter";
-import { draftAndRoute, logEvent, postReply, runAgent } from "./agent";
+import { draftAndRoute, logEvent, markRemoved, postReply, runAgent } from "./agent";
 import { clearSamples, loadSamples } from "./samples";
 import { availableReplies, learnGuidelines, MIN_REPLIES } from "./learn";
 import { clearGuidelinesCache, currentGuidelines } from "./guidelines";
@@ -12,7 +12,7 @@ import { CONCERN_LABEL, FIELDS_FOR, TEAMS_FOR, buildEmail, lastEscalation, getTe
 import { Budget } from "./budget";
 import { canTag, etDayStart, monthRange, norm, parseRosterLines, rematch, scanReviews, type Staff } from "./staff";
 import { draftReply } from "./drafter";
-import { rooftopFor } from "./rooftops";
+import { matchRooftop, replyRooftop, rooftopFor } from "./rooftops";
 import { allowedDomains, canSendAs, decryptText, encryptText, checkAddresses, mailConfigured, MailError } from "./mail";
 
 const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external','external_done')";
@@ -179,7 +179,7 @@ async function draftWithNotes(env: Env, r: ReviewRow, user: User, requireNotes: 
   } catch { /* notes table not set up */ }
   if (requireNotes && !notes.length) return "Add the management notes first, then draft.";
   const source = (r as any).source as string | null;
-  const d = await draftReply(env, r.stars, r.text, rooftopFor(r.rooftop_key, r.location_title), undefined, (r as any).reviewer_name, { notes, source: source || undefined });
+  const d = await draftReply(env, r.stars, r.text, replyRooftop(r as any), undefined, (r as any).reviewer_name, { notes, source: source || undefined });
   if (!d.ok) return `The draft didn't work: ${d.risk_flags[0] || "unknown problem"}. Try again.`;
   const reason = notes.length ? `Drafted with ${notes.length} management note${notes.length === 1 ? "" : "s"}` : "Redrafted";
   // Replies drafted with notes always wait for an approver; outside reviews stay outside
@@ -188,6 +188,46 @@ async function draftWithNotes(env: Env, r: ReviewRow, user: User, requireNotes: 
     .bind(d.reply, d.department, d.sentiment, d.risk_level, JSON.stringify(d.risk_flags), reason, status, r.id).run();
   await logEvent(env, r.id, user.email, "drafted", reason);
   return null;
+}
+
+/** Checks one review on Google right now: marks it removed if it's gone, or restores it if it's back. */
+async function verifyReview(env: Env, user: User, r: ReviewRow): Promise<Response> {
+  if (!r.id.startsWith("accounts/")) return fail("Only Google reviews can be checked on Google.");
+  let exists: boolean;
+  try { exists = await new GBPClient(env).reviewExists(r.id); }
+  catch (e) { return fail(`Couldn't check with Google: ${(e as Error).message}`, 502); }
+  if (!exists) {
+    if (r.status !== "removed") await markRemoved(env, r.id, user.email);
+  } else {
+    try { await env.DB.prepare("UPDATE reviews SET checked_at=? WHERE id=?").bind(nowIso(), r.id).run(); } catch { /* migration 0009 */ }
+    if (r.status === "removed") {
+      await env.DB.prepare("UPDATE reviews SET status=?, route_reason=NULL WHERE id=?").bind(r.reply_text ? "replied_external" : "new", r.id).run();
+      await logEvent(env, r.id, user.email, "restored", "Back on Google");
+    }
+  }
+  const d = await reviewDetail(env, user, r.id);
+  const data: any = await d.json();
+  return json({ ...data, checked: exists ? "Still on Google." : "Not on Google anymore. Marked as removed." });
+}
+
+/** Moves a review on the Auto Group listing to the store it's really about (for stats, escalations and staff tags).
+ *  The reply still comes from the Auto Group listing, since that's where it's posted. */
+async function reassignReview(env: Env, user: User, r: ReviewRow, rooftop: string): Promise<Response> {
+  const listingKey = matchRooftop(r.location_title || "").key;
+  if (!["group", "other"].includes(listingKey)) return fail("Only reviews on the Lester Glenn Auto Group listing can be moved to a store.");
+  const back = !rooftop || rooftop === listingKey;
+  if (!back && !ROOFTOPS.some((x) => x.key === rooftop && !["group"].includes(x.key))) return fail("Pick a store.");
+  const target = back ? listingKey : rooftop;
+  try {
+    await env.DB.prepare("UPDATE reviews SET rooftop_key=?, rooftop_override=? WHERE id=?").bind(target, back ? null : target, r.id).run();
+  } catch { return fail("One-time setup needed: run migrations/0009_removed_and_reassigned.sql in the D1 console.", 503); }
+  // Staff names get matched against the new store's roster
+  try {
+    await env.DB.prepare("DELETE FROM mentions WHERE review_id = ?").bind(r.id).run();
+    await env.DB.prepare("UPDATE reviews SET mentions_scanned_at = NULL WHERE id = ?").bind(r.id).run();
+  } catch { /* staff tables not set up */ }
+  await logEvent(env, r.id, user.email, "reassigned", back ? "Moved back to the Auto Group listing" : `Moved to ${rooftopFor(target).name}`);
+  return reviewDetail(env, user, r.id);
 }
 
 /** Adds a review from another site by hand, ready to escalate. */
@@ -263,13 +303,20 @@ async function reviewDetail(env: Env, user: User, id: string) {
       .bind(id).all<any>()).results;
     notes = await Promise.all(rows.map(async (n) => ({ ...n, body: (await decryptText(env, n.body)) ?? "(This note can't be read; it was saved before the app's key changed.)" })));
   } catch { /* migration 0008 not run yet */ }
-  return json({ review: r, events, escalation, staff, notes, canNote: user.role !== "link" && (canAct(user, r.rooftop_key) || user.canReply) });
+  const listingKey = matchRooftop(r.location_title || "").key;
+  const reassign = r.id.startsWith("accounts/") && ["group", "other"].includes(listingKey) && (user.role === "admin" || user.canReply)
+    ? { listing: r.location_title, moved: !!(r as any).rooftop_override } : null;
+  return json({ review: r, reassign, events, escalation, staff, notes, canNote: user.role !== "link" && (canAct(user, r.rooftop_key) || user.canReply) });
 }
 
 async function reviewAction(env: Env, user: User, id: string, action: string, body: any, origin: string) {
   const r = await getReview(env, id);
   if (!r || !canSee(user, r.rooftop_key)) return fail("Review not found.", 404);
   const replyActions = ["save", "approve", "dismiss", "reopen", "redraft", "draftnotes", "responded"];
+  if (action === "verify" || action === "reassign") {
+    if (!(user.role === "admin" || user.canReply)) return fail("Only admins and reply approvers can do that.", 403);
+    return action === "verify" ? verifyReview(env, user, r) : reassignReview(env, user, r, String(body?.rooftop || ""));
+  }
   if (replyActions.includes(action) && !user.canReply) {
     return fail(`Only ${(env.REPLY_APPROVERS || "the reply approvers").split(",").join(" and ")} can change replies.`, 403);
   }
@@ -296,7 +343,13 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
     await env.DB.prepare("UPDATE reviews SET draft=?, decided_by=?, decided_at=? WHERE id=?").bind(reply, user.email, nowIso(), id).run();
     if (mode(env) === "live" && !r.is_sample) {
       try { await postReply(env, new GBPClient(env), r, reply, user.email, "manager"); }
-      catch (e) { return fail(`Google didn't accept the reply: ${(e as Error).message}`, 502); }
+      catch (e) {
+        if (e instanceof GBPError && e.status === 404) {
+          await markRemoved(env, id, user.email);
+          return fail("This review is no longer on Google (the reviewer deleted it or Google took it down), so there's nothing to reply to. It's been marked as removed.", 410);
+        }
+        return fail(`Google didn't accept the reply: ${(e as Error).message}`, 502);
+      }
     } else {
       await env.DB.prepare("UPDATE reviews SET status='approved' WHERE id=?").bind(id).run();
       await logEvent(env, id, user.email, "approved", "Will post when the agent is live");
@@ -367,6 +420,7 @@ async function stats(env: Env, user: User, url: URL) {
   }
   // Statistics are about Google reviews; reviews added by hand from other sites are left out
   if (await hasSourceCol(env)) parts.push("source IS NULL");
+  parts.push("status != 'removed'");
   const where = parts.join(" AND ");
   const hours = "(julianday(reply_time) - julianday(create_time)) * 24";
   const metrics = `
@@ -527,7 +581,7 @@ async function staffApi(env: Env, user: User, req: Request, path: string, url: U
     const role = url.searchParams.get("role");
     const mScope = sc.sql.replace(/\brooftop_key\b/g, "m.rooftop_key").replace(/\bis_sample\b/g, "r.is_sample");
     const roleSql = role && ["sales", "service", "other"].includes(role) ? " AND s.role = ?" : "";
-    const base = `FROM mentions m JOIN reviews r ON r.id = m.review_id WHERE ${mScope} AND m.review_time >= ? AND m.review_time < ?`;
+    const base = `FROM mentions m JOIN reviews r ON r.id = m.review_id WHERE ${mScope} AND r.status != 'removed' AND m.review_time >= ? AND m.review_time < ?`;
     const args = [...sc.args, range[0], range[1]];
     const [people, unassigned, coverage] = await env.DB.batch([
       env.DB.prepare(`SELECT s.id, s.full_name, s.rooftop_key, s.role, s.active,

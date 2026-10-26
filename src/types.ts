@@ -41,7 +41,8 @@ export type Status =
   | "old_unanswered"   // older than the drafting window, no reply
   | "error"
   | "external"         // added by hand from another site (Yelp, DealerRater...), not responded yet
-  | "external_done";   // responded to on that site
+  | "external_done"    // responded to on that site
+  | "removed";         // the reviewer deleted it, or Google took it down
 
 export const ANSWERED: Status[] = ["auto_posted", "approved_posted", "replied_external"];
 

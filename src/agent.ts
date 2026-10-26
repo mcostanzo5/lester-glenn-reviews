@@ -1,7 +1,7 @@
 import type { Env, ReviewRow, Status } from "./types";
 import { ANSWERED, autoPost, mode, num, nowIso } from "./types";
 import { GBPClient, GBPError, type GReview } from "./gbp";
-import { matchRooftop, rooftopByKey, rooftopFor } from "./rooftops";
+import { matchRooftop, replyRooftop, rooftopByKey, rooftopFor } from "./rooftops";
 import { draftReply } from "./drafter";
 import { route } from "./router";
 import { Budget, BudgetExhausted, unlimited } from "./budget";
@@ -51,7 +51,7 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
       if (!ours) replySource = "google";
     } else if (!ex) {
       status = isFresh(g, maxAge) ? "new" : "old_unanswered";
-    } else if (ex.update_time !== g.update_time || ANSWERED.includes(ex.status)) {
+    } else if (ex.update_time !== g.update_time || ANSWERED.includes(ex.status) || ex.status === "removed") {
       // Edited by the customer, or our reply was removed: look again
       status = isFresh(g, maxAge) ? "new" : "old_unanswered";
       replySource = null;
@@ -62,6 +62,9 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
       status, g.reply_text, g.reply_time, replySource, nowIso());
   });
   await env.DB.batch(writes);
+  // Reviews moved by hand to a specific store (from the Auto Group listing) stay there
+  try { await env.DB.prepare(`UPDATE reviews SET rooftop_key = rooftop_override WHERE rooftop_override IS NOT NULL AND rooftop_key != rooftop_override AND id IN (${ids.map(() => "?").join(",")})`).bind(...ids).run(); }
+  catch { /* migration 0009 not run yet */ }
   // Reviewer names are saved separately so syncing keeps working if migration 0007 hasn't been run yet
   try { await env.DB.batch(reviews.map((g) => env.DB.prepare("UPDATE reviews SET reviewer_name = ? WHERE id = ?").bind(g.reviewer_name, g.id))); }
   catch { /* reviewer_name column not added yet */ }
@@ -200,9 +203,41 @@ async function backfill(env: Env, client: GBPClient, locs: Loc[], budget: Budget
   return count;
 }
 
+/** Marks a review as removed from Google. */
+export async function markRemoved(env: Env, id: string, actor: string) {
+  await env.DB.prepare("UPDATE reviews SET status='removed', route_reason=?, checked_at=? WHERE id=?")
+    .bind(`Removed from Google (found ${new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" })})`, nowIso(), id).run();
+  await logEvent(env, id, actor, "removed", "No longer on Google: deleted by the reviewer or taken down");
+}
+
+/** Looks up open reviews on Google, least recently checked first, and marks any that are gone. */
+async function verifyStillOnGoogle(env: Env, client: GBPClient, budget: Budget, max: number, notes: string[]) {
+  if (max <= 0) return;
+  let rows: { id: string }[];
+  try {
+    rows = (await env.DB.prepare(
+      `SELECT id FROM reviews WHERE is_sample = 0 AND id LIKE 'accounts/%'
+         AND (status IN ('new','pending','ready','approved','error','old_unanswered') OR escalation_open > 0)
+         AND status != 'removed'
+       ORDER BY checked_at IS NOT NULL, checked_at ASC LIMIT ?`).bind(max).all<{ id: string }>()).results;
+  } catch { return; } // migration 0009 not run yet
+  let gone = 0;
+  for (const r of rows) {
+    if (!budget.has(1)) break;
+    try {
+      if (await client.reviewExists(r.id)) await env.DB.prepare("UPDATE reviews SET checked_at=? WHERE id=?").bind(nowIso(), r.id).run();
+      else { await markRemoved(env, r.id, "agent"); gone++; }
+    } catch (e) {
+      if (e instanceof BudgetExhausted) throw e;
+      // a temporary Google error: try this one again another run
+    }
+  }
+  if (gone) notes.push(`${gone} review${gone === 1 ? "" : "s"} no longer on Google, marked as removed.`);
+}
+
 /** Draft one review and save the result. Returns the new status. */
 export async function draftAndRoute(env: Env, r: ReviewRow, actor = "agent", forceReview = false, budget: Budget = unlimited()): Promise<Status> {
-  const d = await draftReply(env, r.stars, r.text, rooftopFor(r.rooftop_key, r.location_title), budget, (r as any).reviewer_name);
+  const d = await draftReply(env, r.stars, r.text, replyRooftop(r as any), budget, (r as any).reviewer_name);
   // A temporary Claude error during a scheduled or manual run: leave it waiting and try again next run
   if (!d.ok && d.retryable && actor === "agent") {
     await env.DB.prepare("UPDATE reviews SET status='new', route_reason=? WHERE id=?")
@@ -257,6 +292,12 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
       }
     }
 
+    // 1b. Make sure reviews that still need attention haven't been deleted on Google
+    if (client && budget.left > 14) {
+      try { await verifyStillOnGoogle(env, client, budget, Math.min(8, budget.left - 14), s.notes); }
+      catch (e) { if (e instanceof BudgetExhausted) throw e; }
+    }
+
     // 2. Draft what's waiting, keeping one call in reserve per draft for posting when live
     const perDraft = m === "live" ? 2 : 1;
     const sampleClause = m === "dry_run" ? "" : " AND is_sample = 0";
@@ -283,6 +324,7 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
           s.posted++;
         } catch (e) {
           if (e instanceof BudgetExhausted) throw e;
+          if (e instanceof GBPError && e.status === 404) { await markRemoved(env, r.id, "agent"); continue; }
           s.errors++;
           await env.DB.prepare("UPDATE reviews SET status='error', route_reason=? WHERE id=?").bind(`Post failed: ${(e as Error).message}`.slice(0, 500), r.id).run();
         }

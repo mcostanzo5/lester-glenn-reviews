@@ -15,6 +15,7 @@ const STATUS = {
   error: ["Post failed", "error"],
   external: ["Not responded yet", "pending"],
   external_done: ["Responded", "posted"],
+  removed: ["Removed from Google", ""],
 };
 const ANSWERED = ["auto_posted", "approved_posted", "replied_external", "external_done"];
 const OPEN_STATUSES = ["new", "pending", "ready", "approved", "error", "old_unanswered", "external"];
@@ -212,7 +213,7 @@ function filtersHtml() {
   return `<form class="filters" id="filters" role="search" onsubmit="return false">
     <label class="sr" for="fStatus">Status</label>
     <select id="fStatus">${opt("", "Any status", f.status)}${opt("open", "Not answered", f.status)}${opt("answered", "Answered", f.status)}
-      ${opt("pending", "Needs review", f.status)}${opt("dismissed", "Dismissed", f.status)}${opt("old_unanswered", "Not answered, over 14 days old", f.status)}</select>
+      ${opt("pending", "Needs review", f.status)}${opt("dismissed", "Dismissed", f.status)}${opt("removed", "Removed from Google", f.status)}${opt("old_unanswered", "Not answered, over 14 days old", f.status)}</select>
     <label class="sr" for="fDays">Time range</label>
     <select id="fDays">${opt("", "Any time", f.days)}${opt("7", "Last 7 days", f.days)}${opt("30", "Last 30 days", f.days)}${opt("90", "Last 90 days", f.days)}${opt("365", "Last 12 months", f.days)}${opt("custom", "Custom range\u2026", f.days)}</select>
     <label class="sr" for="fStars">Rating</label>
@@ -337,7 +338,9 @@ function renderDetail(data) {
 
   const outside = r.source || "";
   let replyBlock = "";
-  if (outside && r.status === "external_done") {
+  if (r.status === "removed") {
+    replyBlock = `<p class="reason removed-note"><b>No longer on Google.</b> The reviewer deleted it, or Google took it down, so it can't be replied to. It's left out of the Inbox, Statistics and staff tallies.</p>`;
+  } else if (outside && r.status === "external_done") {
     replyBlock = `<label class="lbl">Response posted on ${esc(outside)}</label><div class="posted-reply">${esc(r.reply_text || r.draft || "(no text saved)")}</div>
       <p class="meta">${r.decided_by ? "Marked responded by " + esc(r.decided_by) + ", " : ""}${r.reply_time ? ago(r.reply_time) : ""}</p>
       ${canReply ? `<div class="actions"><button class="btn" data-act="reopen">Mark as not responded</button></div>` : ""}`;
@@ -388,8 +391,15 @@ function renderDetail(data) {
         ${linkOnly ? "" : `<button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button>`}
       </div>
     </div>
+    ${data.reassign ? `<div class="reassign">
+      <span>Posted on the <b>${esc(data.reassign.listing || "Auto Group")}</b> listing.${data.reassign.moved ? ` Tracked under <b>${esc(storeName(r.rooftop_key))}</b>.` : ""}</span>
+      <label class="sr" for="reassignStore">Track under store</label>
+      <select id="reassignStore"><option value="">${data.reassign.moved ? "Move back to Auto Group" : "Track under a store\u2026"}</option>
+        ${state.me.rooftops.filter((x) => !["other", "group"].includes(x.key)).map((x) => `<option value="${esc(x.key)}" ${data.reassign.moved && x.key === r.rooftop_key ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
+      <button class="btn" id="reassignBtn">${data.reassign.moved ? "Update" : "Move"}</button></div>` : ""}
     <div>${stars(r.stars, "big-stars")}</div>
-    ${linkOnly ? "" : `<div>${pill(r.status, r.is_sample)}</div>`}
+    ${linkOnly ? "" : `<div class="status-row">${pill(r.status, r.is_sample)}${r.id.startsWith("accounts/") && (state.me.role === "admin" || state.me.canReply)
+      ? ` <button class="btn quiet" id="verifyBtn" title="Ask Google whether this review still exists">Check on Google</button>` : ""}</div>`}
     <blockquote>${r.text ? esc(r.text) : "<em>Rating only, no written review</em>"}</blockquote>
     ${reason}
     ${replyBlock}
@@ -404,6 +414,26 @@ function renderDetail(data) {
   $("#detail").querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => act(r.id, b.dataset.act, b)));
   bindStaffBlock(r, data.staff);
   bindNotes(r);
+  if ($("#verifyBtn")) $("#verifyBtn").onclick = async (e) => {
+    e.target.disabled = true; e.target.textContent = "Checking\u2026";
+    try {
+      const d = await api(`/api/reviews/${encodeURIComponent(r.id)}/verify`, { method: "POST" });
+      renderDetail(d); toast(d.checked);
+      const i = state.rows.findIndex((x) => x.id === r.id); if (i >= 0) { state.rows[i] = d.review; renderList(false); }
+      refreshCounts();
+    } catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = "Check on Google"; }
+  };
+  if ($("#reassignBtn")) $("#reassignBtn").onclick = async (e) => {
+    const target = $("#reassignStore").value;
+    if (!target && !data.reassign.moved) return toast("Pick a store first.", true);
+    e.target.disabled = true;
+    try {
+      const d = await api(`/api/reviews/${encodeURIComponent(r.id)}/reassign`, { method: "POST", body: { rooftop: target } });
+      renderDetail(d); toast(target ? `Now tracked under ${storeName(target)}` : "Moved back to Auto Group");
+      const i = state.rows.findIndex((x) => x.id === r.id); if (i >= 0) { state.rows[i] = d.review; renderList(false); }
+      refreshCounts();
+    } catch (err) { toast(err.message, true); e.target.disabled = false; }
+  };
   if ($("#copyReply")) $("#copyReply").onclick = async () => {
     try { await navigator.clipboard.writeText($("#replyText").value); toast("Copied. Paste it on " + outside + "."); }
     catch { $("#replyText").select(); toast("Press Ctrl+C to copy", true); }
@@ -422,7 +452,8 @@ function renderDetail(data) {
 function eventLabel(a) {
   return { drafted: "Drafted", edited: "Edited", approved: "Approved", posted: "Posted", dismissed: "Dismissed", reopened: "Reopened",
     escalated: "Emailed the team", escalation_resolved: "Marked resolved", staff_tagged: "Staff tag",
-    added: "Added", responded: "Marked responded", note_added: "Added a note", note_removed: "Removed a note" }[a] || a;
+    added: "Added", responded: "Marked responded", note_added: "Added a note", note_removed: "Removed a note",
+    removed: "Removed from Google", restored: "Back on Google", reassigned: "Moved" }[a] || a;
 }
 
 async function act(id, action, btn) {
@@ -550,7 +581,7 @@ function approverNames() {
   return a.length ? a.join(" and ") : "the reply approvers";
 }
 
-const DETAIL_LABELS = { dms: "Client / DMS #", client: "Client name", salesperson: "Salesperson", deal: "Deal #", dealDate: "Deal date",
+const DETAIL_LABELS = { details: "Other details", dms: "Client / DMS #", client: "Client name", salesperson: "Salesperson", deal: "Deal #", dealDate: "Deal date",
   ro: "RO #", roDate: "RO date", advisor: "Service advisor" };
 
 function lastEscalationHtml(e) {
@@ -559,7 +590,9 @@ function lastEscalationHtml(e) {
   const fields = Object.entries(last.fields || {});
   return `<div class="esc-details">
     <p class="lbl">${esc((e.labels && e.labels[last.concern]) || "Concern")}</p>
-    ${fields.length ? `<p class="meta" style="margin:0 0 4px">We believe the customer that left the review is:</p>
+    ${last.unknown ? `<p class="meta" style="margin:0 0 4px">We have been unable to find the customer associated with this review.${fields.length ? " Here is the information we have:" : ""}</p>` : ""}
+    ${fields.length && !last.unknown ? `<p class="meta" style="margin:0 0 4px">We believe the customer that left the review is:</p>` : ""}
+    ${fields.length ? `
       <dl>${fields.map(([k, v]) => `<dt>${esc(DETAIL_LABELS[k] || k)}</dt><dd>${esc(/Date$/.test(k) && /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(v + "T12:00:00Z").toLocaleDateString(undefined, { timeZone: "UTC", dateStyle: "medium" }) : v)}</dd>`).join("")}</dl>` : ""}
     ${last.note ? `<div class="last-note"><span>Last note sent</span>${esc(last.note)}</div>` : ""}
   </div>`;
@@ -592,7 +625,7 @@ function renderEscalate(data) {
   const { review: r, escalation: e } = data;
   const guess = r.department === "sales" ? "sales" : r.department === "service" ? "service" : "";
   const last = e.last;
-  const f = { concern: last ? last.concern : guess, fields: last ? { ...last.fields } : {}, note: "", wholeStore: false, extras: [], removed: new Set() };
+  const f = { concern: last ? last.concern : guess, fields: last ? { ...last.fields } : {}, note: "", wholeStore: false, extras: [], removed: new Set(), unknown: !!(last && last.unknown) };
   const d = $("#detail");
 
   const base = () => {
@@ -628,8 +661,11 @@ function renderEscalate(data) {
         ${["sales", "service", "both", "other"].map((c) => `<label><input type="radio" name="concern" value="${c}" ${f.concern === c ? "checked" : ""}> ${{ sales: "Sales", service: "Service", both: "Both", other: "Other" }[c]}</label>`).join("")}
       </fieldset>
       ${f.concern ? `
+        <label class="check unknown-check"><input type="checkbox" id="escUnknown" ${f.unknown ? "checked" : ""}> We don't know who left this</label>
+        ${f.unknown ? `<p class="note unknown-note">The email will say: "We have been unable to find the customer associated with this review. Here is the information we have:" followed by whatever you fill in below. Leave anything blank that you don't know.</p>` : ""}
         <div class="esc-fields">${fieldsHtml}</div>
-        <p class="note">${last ? "Filled in from the last escalation on this review. Change anything that's different." : "Customer details are optional. If you add any, the email opens with \"We believe the customer that left the review is:\"."} They're saved with this review so follow-ups start filled in.</p>
+        ${f.unknown ? `<label class="field">Other details we have<textarea data-field="details" rows="3" placeholder="Anything that might help: vehicle, approximate visit date, phone or email on the review profile, what the review mentions">${esc(f.fields.details || "")}</textarea></label>` : ""}
+        <p class="note">${last ? "Filled in from the last escalation on this review. Change anything that's different." : f.unknown ? "" : "Customer details are optional. If you add any, the email opens with \"We believe the customer that left the review is:\"."} They're saved with this review so follow-ups start filled in.</p>
         ${last && last.note ? `<div class="last-note"><span>Last note sent</span>${esc(last.note)}</div>` : ""}
         <label class="field">${last ? "Note for this follow-up" : "Note"}<textarea id="escNote" rows="5" placeholder="${last ? "What's changed, or what's still needed?" : "What should the team do?"}">${esc(f.note)}</textarea></label>
         <div class="field"><span>Send to</span>
@@ -643,6 +679,7 @@ function renderEscalate(data) {
 
     $("#escBack").onclick = () => renderDetail(state.detail);
     d.querySelectorAll('input[name="concern"]').forEach((i) => (i.onchange = () => { save(); f.concern = i.value; f.removed.clear(); draw(); }));
+    if ($("#escUnknown")) $("#escUnknown").onchange = (ev) => { save(); f.unknown = ev.target.checked; draw(); };
     if (!f.concern) return;
     $("#cancelEsc").onclick = () => renderDetail(state.detail);
     $("#wholeStore").onchange = (ev) => { save(); f.wholeStore = ev.target.checked; draw(); };
@@ -670,7 +707,7 @@ function renderEscalate(data) {
     d.querySelectorAll("[data-field]").forEach((i) => (f.fields[i.dataset.field] = i.value));
     if ($("#escNote")) f.note = $("#escNote").value;
   };
-  const payload = (isPreview) => ({ concern: f.concern, fields: f.fields, note: f.note, recipients: recipients(), preview: isPreview });
+  const payload = (isPreview) => ({ concern: f.concern, fields: f.fields, note: f.note, recipients: recipients(), unknown: f.unknown, preview: isPreview });
 
   const preview = (p) => {
     d.innerHTML = `

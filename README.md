@@ -198,7 +198,7 @@ out. If a token stops working, the dashboard asks them to sign out and back in.
 **One-time setup**
 1. Run the SQL in `migrations/0003_escalations.sql` in the D1 console. Run it
    once only (a second run gives harmless "duplicate column" errors). Then run
-   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`.
+   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql`.
 2. IT adds two **delegated** Microsoft Graph permissions to the Lester Glenn
    Reviews app registration, **Mail.Send** and **offline_access**, and clicks
    **Grant admin consent**. Delegated Mail.Send only allows sending as the person
@@ -230,6 +230,24 @@ Two reasons you might still upgrade to Workers Paid ($5 a month): the free plan
 also caps CPU time at 10 ms per run, which heavy history-import runs can brush
 against (check the Worker's Metrics page for "Exceeded CPU" errors), and on paid
 you can set `EXTERNAL_REQUEST_BUDGET = "900"` so history imports in one run.
+
+## Removed reviews
+
+Google's list only shows reviews that still exist, so each run also looks up a
+few reviews that still need attention (Inbox and open escalations), least
+recently checked first. Any that are gone are marked **Removed from Google**
+and drop out of the Inbox, Statistics and staff tallies; find them in All
+reviews with the "Removed from Google" filter. **Check on Google** on a review
+checks it right away. If a removed review shows up on Google again, it's
+restored.
+
+## Auto Group reviews about a specific store
+
+Reviews on the Lester Glenn Auto Group listing have a store picker. Moving one
+to a store counts it in that store's stats, sends escalations to that store's
+teams, and matches staff names against that store's roster. The reply still
+comes from the Auto Group listing, since that's where it's posted. The move
+sticks through future syncs, and it can be moved back.
 
 ## Manual escalations (other review sites)
 
