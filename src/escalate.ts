@@ -93,7 +93,7 @@ export function buildEmail(r: ReviewRow, input: EscalationInput, sender: User, o
   const firstAt = r.escalation_first_at || sentAt;
   const who = sender.name ? `${sender.name} (${sender.email})` : sender.email;
   const stars = r.stars ? "\u2605".repeat(r.stars) + "\u2606".repeat(5 - r.stars) : "No rating";
-  const subject = `${r.is_sample ? "[TEST, sample review] " : ""}${CONCERN_LABEL[input.concern]}: ${store} | ${r.stars ? r.stars + "-star" : "Unrated"} Google review${followups ? ` | Follow-up #${followups}` : ""}`;
+  const subject = `${r.is_sample ? "[TEST, sample review] " : ""}${CONCERN_LABEL[input.concern]}: ${store} | ${r.stars ? r.stars + "-star" : "Unrated"} ${(r as any).source || "Google"} review${followups ? ` | Follow-up #${followups}` : ""}`;
 
   // Outlook ignores inherited fonts and falls back to Times New Roman, so every element sets its own.
   const F = "font-family:Arial,Helvetica,sans-serif;";
@@ -130,7 +130,8 @@ export function buildEmail(r: ReviewRow, input: EscalationInput, sender: User, o
   <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 22px">${customerRows}</table>` : ""}
   ${input.note ? `${heading(`Note from ${esc(sender.name || sender.email)}:`)}
   <div style="${T}white-space:pre-wrap;margin:0 0 22px">${esc(input.note)}</div>` : ""}
-  ${heading("The review")}
+  ${heading(`The review${(r as any).source ? ` (posted on ${esc((r as any).source)})` : ""}`)}
+  ${(r as any).source_url ? `<p style="${F}font-size:14px;line-height:20px;margin:-4px 0 8px"><a href="${esc((r as any).source_url)}" style="color:#0772bc">View it on ${esc((r as any).source)}</a></p>` : ""}
   <div style="${T}background:#f3f5f8;border-left:4px solid #e39b12;padding:12px 16px;margin:0 0 22px;white-space:pre-wrap">${r.text ? esc(r.text) : "<em>Rating only, no written review</em>"}</div>
   <table role="presentation" cellpadding="0" cellspacing="0" style="border-top:1px solid #dbe1e8;width:100%">
     <tr><td colspan="2" style="height:8px;font-size:0;line-height:0">&nbsp;</td></tr>

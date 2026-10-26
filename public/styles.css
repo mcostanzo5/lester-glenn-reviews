@@ -162,6 +162,22 @@ body.link-mode .detail { position: static; max-width: 760px; margin: 24px auto; 
 .list .row-wrap.escalated .row:hover { background: transparent; }
 .pill.hot { background: var(--red); color: #fff; }
 
+/* Manual escalation and outside reviews */
+.manual-esc { margin-left: auto; background: #fff; color: var(--red); border: 2px solid #fff; font-weight: 700; padding: 6px 12px; }
+.manual-esc::before { content: "!"; font-weight: 800; margin-right: 6px; }
+.manual-esc:hover { background: var(--red); color: #fff; border-color: #fff; }
+.manual-esc + .who { margin-left: 16px; }
+.pill.source { background: var(--ink); color: var(--panel); margin-left: 6px; }
+@media (max-width: 760px) { .manual-esc { padding: 5px 8px; font-size: 13px; } }
+
+/* Management notes */
+.notes { list-style: none; padding: 0; margin: 6px 0 10px; }
+.notes li { border-left: 3px solid var(--blue); background: var(--paper); border-radius: var(--radius-s); padding: 8px 12px; margin-bottom: 8px; }
+.note-meta { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--muted); }
+.note-meta .btn { padding: 2px 6px; font-size: 13px; }
+.note-body { white-space: pre-wrap; font-size: 15px; margin-top: 2px; }
+.notes-block textarea { width: 100%; border: 1px solid var(--line); border-radius: var(--radius-s); padding: 8px 10px; font: inherit; background: var(--panel); }
+
 /* Escalation */
 .tab-count:not(:empty) { display: inline-block; min-width: 20px; padding: 0 6px; margin-left: 4px; border-radius: 999px; background: var(--red); color: #fff; font-size: 12.5px; line-height: 20px; text-align: center; }
 .row-wrap.has-quick.has-resolve .row { padding-right: 150px; }

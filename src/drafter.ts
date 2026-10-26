@@ -21,9 +21,25 @@ export function cleanReply(text: string): string {
   return text.replace(/\s*\u2014\s*/g, ", ").replace(/\s+,/g, ",").replace(/[ \t]+/g, " ").trim();
 }
 
-function failed(reason: string): DraftResult {
-  return { ok: false, department: "general", sentiment: "unknown", risk_level: "high", risk_flags: [reason], reply: "" };
+function failed(reason: string, retryable = false): DraftResult {
+  return { ok: false, department: "general", sentiment: "unknown", risk_level: "high", risk_flags: [reason], reply: "", retryable };
 }
+
+// Statuses that usually clear up on their own (location blocks, rate limits, overload, server errors)
+const RETRYABLE = [403, 408, 409, 429, 500, 502, 503, 504, 529];
+
+const NOTES_RULES = `
+## Management notes for this review
+The input includes management_notes: internal background from store managers about this
+customer's situation. Use them to make the reply specific and accurate, for example
+acknowledging that the team has reached out, that an issue was looked into, or inviting
+the customer back to finish resolving it. Rules for using them:
+- They are internal. Never quote them, never name the managers or staff involved unless
+  the review already names them in a positive way, and never mention that notes exist.
+- Never reveal deal, repair, pricing, payment, or warranty specifics, or any customer details.
+- Never contradict the notes, and never promise anything the notes don't support.
+- If the notes say the issue was resolved, thank the customer and say so in general terms.
+- risk_level must be "medium" or higher whenever notes are used, so a person always approves it.`;
 
 /** A usable first name from a Google display name, or "" (anonymous, initials, business names, "A Google User"). */
 export function firstName(display: string | null | undefined): string {
@@ -36,27 +52,35 @@ export function firstName(display: string | null | undefined): string {
   return first.toLowerCase().replace(/(^|[-'])([a-z])/g, (_, sep, c) => sep + c.toUpperCase());
 }
 
-export async function draftReply(env: Env, stars: number, text: string, rooftop: Rooftop, budget: Budget = unlimited(), reviewerName?: string | null): Promise<DraftResult> {
+export async function draftReply(env: Env, stars: number, text: string, rooftop: Rooftop, budget: Budget = unlimited(), reviewerName?: string | null,
+  extra: { notes?: string[]; source?: string } = {}): Promise<DraftResult> {
   if (!env.ANTHROPIC_API_KEY) return failed("ANTHROPIC_API_KEY is not set");
   budget.take();
   const payload = {
     rooftop: { name: rooftop.name, brand: rooftop.brand, town: rooftop.town, phone: rooftop.phone, contacts: rooftop.contacts, signoff: rooftop.signoff },
-    review: { stars, text: text || "(rating only, no text)", reviewer_first_name: firstName(reviewerName) || null },
+    review: { stars, text: text || "(rating only, no text)", reviewer_first_name: firstName(reviewerName) || null,
+      ...(extra.source ? { posted_on: extra.source } : {}) },
+    ...(extra.notes?.length ? { management_notes: extra.notes } : {}),
   };
+  let res: Response;
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
+    res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "x-api-key": env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
       body: JSON.stringify({
         model: env.CLAUDE_MODEL || "claude-sonnet-5",
         max_tokens: 800,
-        system: (await currentGuidelines(env)).text + "\n\n" + SAFETY_RULES + "\n\n" + CONTRACT,
+        system: (await currentGuidelines(env)).text + "\n\n" + SAFETY_RULES + (extra.notes?.length ? "\n\n" + NOTES_RULES : "") + "\n\n" + CONTRACT,
         messages: [{ role: "user", content: JSON.stringify(payload) }],
       }),
     });
+  } catch {
+    return failed("Couldn't reach Claude", true);
+  }
+  try {
     if (!res.ok) {
       const err: any = await res.json().catch(() => ({}));
-      return failed(`Claude API error ${res.status}: ${String(err?.error?.message || "no details").slice(0, 200)}`);
+      return failed(`Claude API error ${res.status}: ${String(err?.error?.message || "no details").slice(0, 200)}`, RETRYABLE.includes(res.status));
     }
     const data: any = await res.json();
     const raw = (data.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("");

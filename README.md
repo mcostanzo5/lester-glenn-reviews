@@ -198,7 +198,7 @@ out. If a token stops working, the dashboard asks them to sign out and back in.
 **One-time setup**
 1. Run the SQL in `migrations/0003_escalations.sql` in the D1 console. Run it
    once only (a second run gives harmless "duplicate column" errors). Then run
-   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`.
+   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`.
 2. IT adds two **delegated** Microsoft Graph permissions to the Lester Glenn
    Reviews app registration, **Mail.Send** and **offline_access**, and clicks
    **Grant admin consent**. Delegated Mail.Send only allows sending as the person
@@ -231,13 +231,45 @@ also caps CPU time at 10 ms per run, which heavy history-import runs can brush
 against (check the Worker's Metrics page for "Exceeded CPU" errors), and on paid
 you can set `EXTERNAL_REQUEST_BUDGET = "900"` so history imports in one run.
 
+## Manual escalations (other review sites)
+
+**Manual Escalation** in the header adds a review from DealerRater, Yelp, Facebook,
+Cars.com, CarGurus, BBB, Edmunds, Autotrader, or any other site: pick the store
+and site, paste the review, add the star rating, date, reviewer name and link if
+you have them, then fill in the escalation email as usual. The review shows in
+that store's All reviews and Escalations, tagged with its site.
+
+These reviews can't be posted to from here. Draft a response, click **Copy**,
+post it on the site, then click **Mark as responded**. They're left out of
+Statistics (which covers Google), but staff named in them still count on the
+Staff tab. A review added by mistake can be deleted from its panel.
+
+## Management notes
+
+Every review has a **Management notes** section for background from the store
+team (paste the manager's email, or type what happened and what was done). Notes
+are stored encrypted and are internal only. **Draft a reply with these notes**
+writes a reply that reflects them without quoting them or revealing customer or
+deal details, and it always waits for an approver. Escalation recipients see the
+notes on their read-only page.
+
 ## Inbox and approvals
 
 The Inbox is every review without a reply, most urgent first: open escalations
 (shown with a red frame), flagged drafts, failed posts, reviews waiting for a
 draft, drafts ready for approval, approved replies waiting to go live, then
-older unanswered reviews. With `AUTO_POST = "off"` (the default), nothing posts
+older unanswered reviews from the current calendar year (Eastern). Unanswered
+reviews from earlier years stay in All reviews but not the Inbox, unless they're
+escalated or have a draft waiting. With `AUTO_POST = "off"` (the default), nothing posts
 until an approver clicks Approve and post, even in live mode.
+
+## Where the Worker runs
+
+`[placement]` in `wrangler.toml` pins the Worker near AWS us-east-1 (Virginia).
+Cloudflare can start scheduled runs in any data center, including places Claude
+doesn't serve, so each scheduled run hands its work to the Worker's own address
+(`SELF_URL`), which runs in the pinned location. If a Claude call still fails
+with a temporary error, that review waits and is drafted on the next run.
 
 ## History cutoff
 

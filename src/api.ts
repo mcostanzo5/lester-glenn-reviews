@@ -11,10 +11,32 @@ import { clearGuidelinesCache, currentGuidelines } from "./guidelines";
 import { CONCERN_LABEL, FIELDS_FOR, TEAMS_FOR, buildEmail, lastEscalation, getTeams, parseEscalation, resolveEscalation, saveTeams, sendEscalation, type Team } from "./escalate";
 import { Budget } from "./budget";
 import { canTag, etDayStart, monthRange, norm, parseRosterLines, rematch, scanReviews, type Staff } from "./staff";
-import { allowedDomains, canSendAs, checkAddresses, mailConfigured, MailError } from "./mail";
+import { draftReply } from "./drafter";
+import { rooftopFor } from "./rooftops";
+import { allowedDomains, canSendAs, decryptText, encryptText, checkAddresses, mailConfigured, MailError } from "./mail";
 
-const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external')";
-const OPEN_SQL = "('new','pending','ready','approved','error','old_unanswered')";
+const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external','external_done')";
+const OPEN_SQL = "('new','pending','ready','approved','error','old_unanswered','external')";
+
+export const OUTSIDE_SOURCES = ["DealerRater", "Yelp", "Facebook", "Cars.com", "CarGurus", "BBB", "Edmunds", "Autotrader"];
+
+let sourceColReady = false;
+/** True once migration 0008 has added the source column (reviews from other sites). */
+async function hasSourceCol(env: Env): Promise<boolean> {
+  if (sourceColReady) return true;
+  try { await env.DB.prepare("SELECT source FROM reviews LIMIT 1").first(); sourceColReady = true; } catch { /* not yet */ }
+  return sourceColReady;
+}
+
+/** Calendar-day range in Eastern time, end date included. */
+function dayRange(startDay: string, endDay: string): { start: string | null; end: string | null } {
+  const start = etDayStart(startDay || "");
+  let end: string | null = null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(endDay || "")) {
+    end = etDayStart(new Date(Date.parse(endDay + "T12:00:00Z") + 86400_000).toISOString().slice(0, 10));
+  }
+  return { start, end };
+}
 /** The Inbox: every review without a reply (dismissed excluded), except that reviews too old
  *  for an automatic draft only show if they're from the current calendar year (Eastern).
  *  Open escalations always show. */
@@ -23,7 +45,7 @@ async function inboxWhere(env: Env): Promise<{ sql: string; args: unknown[] }> {
   const yearStart = etDayStart(`${year}-01-01`)!;
   const escalated = (await hasEscalationCols(env)) ? " OR escalation_open > 0" : "";
   return {
-    sql: `(status IN ('new','pending','ready','approved','error') OR (status = 'old_unanswered' AND (create_time >= ?${escalated})))`,
+    sql: `(status IN ('new','pending','ready','approved','error') OR (status = 'old_unanswered' AND (create_time >= ?${escalated}))${escalated ? " OR (status = 'external' AND escalation_open > 0)" : ""})`,
     args: [yearStart],
   };
 }
@@ -83,6 +105,7 @@ async function me(env: Env, user: User) {
     lastRun: lastRun ? { at: lastRun.finished_at, manual: lastRun.trigger.startsWith("manual"), errors: lastRun.errors } : null,
     nextRun: mode(env) === "dry_run" ? null : nextScheduledRun(env.RUN_HOURS_ET),
     approvers: (env.REPLY_APPROVERS || "").split(",").map((e) => e.trim()).filter(Boolean),
+    sources: OUTSIDE_SOURCES,
     storeNames: Object.fromEntries([...ROOFTOPS, DEFAULT_ROOFTOP].map((r) => [r.key, r.name])),
     rooftops: visibleRooftops(user).map((r) => ({ ...r, open: map[r.key] || 0 })),
   });
@@ -102,14 +125,11 @@ async function listReviews(env: Env, user: User, url: URL) {
   const days = parseInt(url.searchParams.get("days") || "", 10);
   if (days > 0) { where.push("create_time >= ?"); args.push(new Date(Date.now() - days * 86400_000).toISOString()); }
   // Custom range: whole days in Eastern time, end date included
-  const start = etDayStart(url.searchParams.get("start") || "");
-  const endDay = url.searchParams.get("end") || "";
-  if (start) { where.push("create_time >= ?"); args.push(start); }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(endDay)) {
-    const next = new Date(Date.parse(endDay + "T12:00:00Z") + 86400_000).toISOString().slice(0, 10);
-    const end = etDayStart(next);
-    if (end) { where.push("create_time < ?"); args.push(end); }
-  }
+  const days2 = dayRange(url.searchParams.get("start") || "", url.searchParams.get("end") || "");
+  if (days2.start) { where.push("create_time >= ?"); args.push(days2.start); }
+  if (days2.end) { where.push("create_time < ?"); args.push(days2.end); }
+  const src = url.searchParams.get("source");
+  if (src && (await hasSourceCol(env))) where.push(src === "google" ? "source IS NULL" : "source IS NOT NULL");
   const stars = url.searchParams.get("stars");
   if (stars === "low") where.push("stars <= 3");
   else if (stars === "high") where.push("stars >= 4");
@@ -150,6 +170,57 @@ async function hasReviewerNames(env: Env): Promise<boolean> {
   return reviewerNamesReady;
 }
 
+/** Writes a reply using the review plus any management notes. Returns an error message, or null. */
+async function draftWithNotes(env: Env, r: ReviewRow, user: User, requireNotes: boolean): Promise<string | null> {
+  let notes: string[] = [];
+  try {
+    const rows = (await env.DB.prepare("SELECT body FROM review_notes WHERE review_id = ? ORDER BY id").bind(r.id).all<{ body: string }>()).results;
+    notes = (await Promise.all(rows.map((n) => decryptText(env, n.body)))).filter(Boolean) as string[];
+  } catch { /* notes table not set up */ }
+  if (requireNotes && !notes.length) return "Add the management notes first, then draft.";
+  const source = (r as any).source as string | null;
+  const d = await draftReply(env, r.stars, r.text, rooftopFor(r.rooftop_key, r.location_title), undefined, (r as any).reviewer_name, { notes, source: source || undefined });
+  if (!d.ok) return `The draft didn't work: ${d.risk_flags[0] || "unknown problem"}. Try again.`;
+  const reason = notes.length ? `Drafted with ${notes.length} management note${notes.length === 1 ? "" : "s"}` : "Redrafted";
+  // Replies drafted with notes always wait for an approver; outside reviews stay outside
+  const status = source ? "external" : "pending";
+  await env.DB.prepare("UPDATE reviews SET draft=?, department=?, sentiment=?, risk_level=?, risk_flags=?, route_reason=?, status=? WHERE id=?")
+    .bind(d.reply, d.department, d.sentiment, d.risk_level, JSON.stringify(d.risk_flags), reason, status, r.id).run();
+  await logEvent(env, r.id, user.email, "drafted", reason);
+  return null;
+}
+
+/** Adds a review from another site by hand, ready to escalate. */
+async function createManualReview(env: Env, user: User, body: any): Promise<Response> {
+  if (!(await hasSourceCol(env))) return fail("One-time setup needed: run migrations/0008_manual_reviews_and_notes.sql in the D1 console.", 503);
+  const rooftop = String(body?.rooftop || "");
+  if (![...ROOFTOPS].some((r) => r.key === rooftop)) return fail("Pick a store.");
+  if (!canAct(user, rooftop)) return fail("You can't add reviews for that store.", 403);
+  let source = String(body?.source || "").trim();
+  if (source === "Other") source = String(body?.source_other || "").trim();
+  if (!source) return fail("Pick where the review was posted.");
+  source = source.slice(0, 40);
+  const text = String(body?.text || "").trim().slice(0, 10000);
+  if (!text) return fail("Paste the review text.");
+  const stars = Math.max(0, Math.min(5, parseInt(body?.stars, 10) || 0));
+  const url = String(body?.url || "").trim();
+  if (url && !/^https?:\/\/\S+$/i.test(url)) return fail("The link should start with http:// or https://");
+  const day = String(body?.date || "");
+  const dayStart = etDayStart(day);
+  if (dayStart && dayStart > nowIso()) return fail("The review date can't be in the future.");
+  // Midday Eastern on the date given, or right now if that's still ahead (today's reviews)
+  const noon = dayStart ? new Date(Date.parse(dayStart) + 12 * 3600_000).toISOString() : nowIso();
+  const when = noon > nowIso() ? nowIso() : noon;
+  const id = `manual/${crypto.randomUUID()}`;
+  const name = rooftopFor(rooftop).name;
+  await env.DB.prepare(`INSERT INTO reviews (id, location_name, rooftop_key, location_title, stars, text, create_time, update_time, status, is_sample, synced_at, source, source_url)
+    VALUES (?,?,?,?,?,?,?,?, 'external', 0, ?, ?, ?)`).bind(id, null, rooftop, name, stars, text, when, when, nowIso(), source, url || null).run();
+  const reviewer = String(body?.reviewer_name || "").trim().slice(0, 120);
+  if (reviewer) { try { await env.DB.prepare("UPDATE reviews SET reviewer_name = ? WHERE id = ?").bind(reviewer, id).run(); } catch { /* column not added */ } }
+  await logEvent(env, id, user.email, "added", `Added by hand from ${source}`);
+  return json({ id });
+}
+
 async function getReview(env: Env, id: string): Promise<ReviewRow | null> {
   return env.DB.prepare("SELECT * FROM reviews WHERE id = ?").bind(id).first<ReviewRow>();
 }
@@ -186,23 +257,39 @@ async function reviewDetail(env: Env, user: User, id: string) {
       };
     } catch { /* migration 0006 not run yet */ }
   }
-  return json({ review: r, events, escalation, staff });
+  let notes: any[] | null = null;
+  try {
+    const rows = (await env.DB.prepare("SELECT id, author, author_name, body, created_at FROM review_notes WHERE review_id = ? ORDER BY id")
+      .bind(id).all<any>()).results;
+    notes = await Promise.all(rows.map(async (n) => ({ ...n, body: (await decryptText(env, n.body)) ?? "(This note can't be read; it was saved before the app's key changed.)" })));
+  } catch { /* migration 0008 not run yet */ }
+  return json({ review: r, events, escalation, staff, notes, canNote: user.role !== "link" && (canAct(user, r.rooftop_key) || user.canReply) });
 }
 
 async function reviewAction(env: Env, user: User, id: string, action: string, body: any, origin: string) {
   const r = await getReview(env, id);
   if (!r || !canSee(user, r.rooftop_key)) return fail("Review not found.", 404);
-  const replyActions = ["save", "approve", "dismiss", "reopen", "redraft"];
+  const replyActions = ["save", "approve", "dismiss", "reopen", "redraft", "draftnotes", "responded"];
   if (replyActions.includes(action) && !user.canReply) {
     return fail(`Only ${(env.REPLY_APPROVERS || "the reply approvers").split(",").join(" and ")} can change replies.`, 403);
   }
-  if (!replyActions.includes(action) && !canAct(user, r.rooftop_key)) return fail("You have view-only access to this store.", 403);
+  if (action === "note" || action === "delnote") {
+    if (user.role === "link" || !(canAct(user, r.rooftop_key) || user.canReply)) return fail("You can't add notes to this review.", 403);
+  } else if (!replyActions.includes(action) && !canAct(user, r.rooftop_key)) return fail("You have view-only access to this store.", 403);
+  const outside = !!(r as any).source;
   const reply = typeof body?.reply === "string" ? cleanReply(body.reply) : "";
 
   if (action === "save") {
     if (!reply) return fail("Write a reply before saving.");
     await env.DB.prepare("UPDATE reviews SET draft = ? WHERE id = ?").bind(reply, id).run();
     await logEvent(env, id, user.email, "edited");
+  } else if (action === "approve" && outside) {
+    return fail(`This review is on ${(r as any).source}, so it can't be posted from here. Copy the reply, post it there, then click Mark as responded.`);
+  } else if (action === "responded") {
+    if (!outside) return fail("Only reviews from other sites are marked as responded by hand.");
+    await env.DB.prepare("UPDATE reviews SET status='external_done', draft=COALESCE(?, draft), reply_text=COALESCE(?, draft), reply_time=?, reply_source='manager', decided_by=?, decided_at=? WHERE id=?")
+      .bind(reply || null, reply || null, nowIso(), user.email, nowIso(), id).run();
+    await logEvent(env, id, user.email, "responded", `Responded on ${(r as any).source}`);
   } else if (action === "approve") {
     if (!reply) return fail("Write a reply before approving.");
     if (["auto_posted", "approved_posted", "replied_external"].includes(r.status)) return fail("This review already has a reply.");
@@ -218,7 +305,7 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
     await env.DB.prepare("UPDATE reviews SET status='dismissed', decided_by=?, decided_at=? WHERE id=?").bind(user.email, nowIso(), id).run();
     await logEvent(env, id, user.email, "dismissed", String(body?.note || "").slice(0, 500));
   } else if (action === "reopen") {
-    await env.DB.prepare("UPDATE reviews SET status='pending' WHERE id=?").bind(id).run();
+    await env.DB.prepare("UPDATE reviews SET status=? WHERE id=?").bind(outside ? "external" : "pending", id).run();
     await logEvent(env, id, user.email, "reopened");
   } else if (action === "escalate") {
     const parsed = parseEscalation(env, body);
@@ -234,6 +321,30 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
     }
   } else if (action === "resolve") {
     await resolveEscalation(env, r, user);
+  } else if (action === "redraft" && outside) {
+    const err = await draftWithNotes(env, r, user, false);
+    if (err) return fail(err, 502);
+  } else if (action === "draftnotes") {
+    const err = await draftWithNotes(env, r, user, true);
+    if (err) return fail(err, 502);
+  } else if (action === "note") {
+    const text = String(body?.body || "").replace(/\s*\u2014\s*/g, ", ").trim().slice(0, 8000);
+    if (!text) return fail("Paste or type the note first.");
+    await env.DB.prepare("INSERT INTO review_notes (review_id, author, author_name, body, created_at) VALUES (?,?,?,?,?)")
+      .bind(id, user.email, user.name || null, await encryptText(env, text), nowIso()).run();
+    await logEvent(env, id, user.email, "note_added");
+  } else if (action === "delnote") {
+    const n = await env.DB.prepare("SELECT author FROM review_notes WHERE id = ? AND review_id = ?").bind(Number(body?.note_id), id).first<{ author: string }>();
+    if (!n) return fail("Note not found.", 404);
+    if (n.author !== user.email && user.role !== "admin") return fail("Only the person who added a note, or an admin, can remove it.", 403);
+    await env.DB.prepare("DELETE FROM review_notes WHERE id = ?").bind(Number(body?.note_id)).run();
+    await logEvent(env, id, user.email, "note_removed");
+  } else if (action === "deletemanual") {
+    if (!outside) return fail("Only reviews added by hand can be deleted.");
+    for (const sql of ["DELETE FROM review_notes WHERE review_id = ?", "DELETE FROM mentions WHERE review_id = ?", "DELETE FROM escalations WHERE review_id = ?", "DELETE FROM events WHERE review_id = ?", "DELETE FROM reviews WHERE id = ?"]) {
+      try { await env.DB.prepare(sql).bind(id).run(); } catch { /* table not set up */ }
+    }
+    return json({ deleted: true });
   } else if (action === "redraft") {
     await draftAndRoute(env, r, user.email, true);
   } else {
@@ -245,8 +356,18 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
 async function stats(env: Env, user: User, url: URL) {
   const days = parseInt(url.searchParams.get("days") || "90", 10) || 0;
   const s = scope(user, env, url.searchParams.get("rooftop"));
-  const where = days > 0 ? `${s.sql} AND create_time >= ?` : s.sql;
-  const args = days > 0 ? [...s.args, new Date(Date.now() - days * 86400_000).toISOString()] : s.args;
+  const parts = [s.sql];
+  const args: unknown[] = [...s.args];
+  const range = dayRange(url.searchParams.get("start") || "", url.searchParams.get("end") || "");
+  if (range.start || range.end) {
+    if (range.start) { parts.push("create_time >= ?"); args.push(range.start); }
+    if (range.end) { parts.push("create_time < ?"); args.push(range.end); }
+  } else if (days > 0) {
+    parts.push("create_time >= ?"); args.push(new Date(Date.now() - days * 86400_000).toISOString());
+  }
+  // Statistics are about Google reviews; reviews added by hand from other sites are left out
+  if (await hasSourceCol(env)) parts.push("source IS NULL");
+  const where = parts.join(" AND ");
   const hours = "(julianday(reply_time) - julianday(create_time)) * 24";
   const metrics = `
     COUNT(*) AS total,
@@ -379,6 +500,7 @@ export async function handleApi(req: Request, env: Env, user: User): Promise<Res
     return fail("You can open reviews from escalation emails. Ask an admin if you need dashboard access.", 403);
   }
   if (path === "/api/reviews" && req.method === "GET") return listReviews(env, user, url);
+  if (path === "/api/reviews" && req.method === "POST") return createManualReview(env, user, body);
   if (path === "/api/stats") return stats(env, user, url);
   if (path.startsWith("/api/admin/")) return admin(env, user, req, path, url, body);
   if (path.startsWith("/api/staff")) return staffApi(env, user, req, path, url, body);

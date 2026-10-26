@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { me: null, view: "inbox", rooftop: "", filters: { status: "", stars: "", q: "", days: "", start: "", end: "" }, page: 0, rows: [], selected: null, statsDays: 90 };
+const state = { me: null, view: "inbox", rooftop: "", filters: { status: "", stars: "", q: "", days: "", start: "", end: "" }, page: 0, rows: [], selected: null, statsDays: 90, statsStart: "", statsEnd: "" };
 
 const STATUS = {
   new: ["Waiting for draft", ""],
@@ -13,9 +13,11 @@ const STATUS = {
   dismissed: ["Dismissed", ""],
   old_unanswered: ["Unanswered, older", ""],
   error: ["Post failed", "error"],
+  external: ["Not responded yet", "pending"],
+  external_done: ["Responded", "posted"],
 };
-const ANSWERED = ["auto_posted", "approved_posted", "replied_external"];
-const OPEN_STATUSES = ["new", "pending", "ready", "approved", "error", "old_unanswered"];
+const ANSWERED = ["auto_posted", "approved_posted", "replied_external", "external_done"];
+const OPEN_STATUSES = ["new", "pending", "ready", "approved", "error", "old_unanswered", "external"];
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -96,6 +98,8 @@ async function boot() {
   chip.classList.toggle("live", m.mode === "live");
   STATUS.ready = [m.autoPost ? "Ready to auto-post" : "Draft ready", "ready"];
   renderRunStatus();
+  const mb = $("#manualEscBtn");
+  if (mb && (m.role === "admin" || m.role === "manager")) { mb.hidden = false; mb.onclick = openManualEscalation; }
   const banner = $("#banner");
   if (m.mode === "dry_run") { banner.hidden = false; banner.textContent = "Dry run: showing sample reviews. Nothing is read from or posted to Google."; }
   if (m.mode === "shadow") { banner.hidden = false; banner.textContent = "Shadow mode: these are real reviews, but no replies are posted to Google yet."; }
@@ -103,7 +107,7 @@ async function boot() {
 
   $("#tabs").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-view]");
-    if (b) setView(b.dataset.view);
+    if (b) { state.filters.source = ""; setView(b.dataset.view); }
   });
   $("#storeSelect").addEventListener("change", (e) => setRooftop(e.target.value));
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.selected) closeDetail(); });
@@ -230,7 +234,7 @@ function bindFilters() {
     const custom = $("#fDays").value === "custom";
     let start = custom && $("#fStart") ? $("#fStart").value : "", end = custom && $("#fEnd") ? $("#fEnd").value : "";
     if (start && end && start > end) [start, end] = [end, start];
-    state.filters = { status: $("#fStatus").value, stars: $("#fStars").value, q: $("#fQ").value.trim(), days: $("#fDays").value, start, end };
+    state.filters = { status: $("#fStatus").value, stars: $("#fStars").value, q: $("#fQ").value.trim(), days: $("#fDays").value, start, end, source: state.filters.source || "" };
     state.page = 0;
     loadList();
   };
@@ -286,7 +290,7 @@ function rowHtml(r) {
     : `${ago(r.create_time)}<br>${hot ? `<span class="pill hot">Escalated</span> ` : ""}${pill(r.status, r.is_sample)}${r.escalation_count ? ` <span class="pill esc" title="Emails sent to the team about this review">\u2709 ${r.escalation_count}</span>` : ""}`;
   return `<div class="row-wrap${quick ? " has-quick" : ""}${resolveBtn ? " has-resolve" : ""}${hot ? " escalated" : ""}"><button class="row" data-id="${esc(r.id)}" aria-current="${state.selected === r.id}">
     <div class="stars-col">${stars(r.stars)}</div>
-    <div><div class="store">${esc(shortName(r.rooftop_key))}${r.reviewer_name ? ` <span class="reviewer">${esc(r.reviewer_name)}</span>` : ""}</div><div class="excerpt${r.text ? "" : " empty"}">${text}</div></div>
+    <div><div class="store">${esc(shortName(r.rooftop_key))}${r.source ? ` <span class="pill source">${esc(r.source)}</span>` : ""}${r.reviewer_name ? ` <span class="reviewer">${esc(r.reviewer_name)}</span>` : ""}</div><div class="excerpt${r.text ? "" : " empty"}">${text}</div></div>
     <div class="when">${when}</div>
   </button>${resolveBtn}${quick}</div>`;
 }
@@ -331,8 +335,24 @@ function renderDetail(data) {
   let flags = [];
   try { flags = JSON.parse(r.risk_flags || "[]"); } catch { /* ignore */ }
 
+  const outside = r.source || "";
   let replyBlock = "";
-  if (answered) {
+  if (outside && r.status === "external_done") {
+    replyBlock = `<label class="lbl">Response posted on ${esc(outside)}</label><div class="posted-reply">${esc(r.reply_text || r.draft || "(no text saved)")}</div>
+      <p class="meta">${r.decided_by ? "Marked responded by " + esc(r.decided_by) + ", " : ""}${r.reply_time ? ago(r.reply_time) : ""}</p>
+      ${canReply ? `<div class="actions"><button class="btn" data-act="reopen">Mark as not responded</button></div>` : ""}`;
+  } else if (outside && r.status !== "dismissed") {
+    replyBlock = `<label class="lbl" for="replyText">Response to post on ${esc(outside)}</label>
+      <textarea id="replyText" ${canReply ? "" : "readonly"} placeholder="${canReply ? "Click Draft a response, or write one here." : ""}">${esc(r.draft || "")}</textarea>
+      ${!canReply ? `<p class="meta">Only ${esc(approverNames())} can write or change responses.</p>` : `<div class="actions">
+        <button class="btn primary" data-act="redraft">${r.draft ? "Redraft" : "Draft a response"}</button>
+        <button class="btn" id="copyReply" type="button">Copy</button>
+        <button class="btn" data-act="save">Save edits</button>
+        <button class="btn" data-act="responded">Mark as responded</button>
+        <button class="btn quiet danger" data-act="dismiss">Dismiss</button>
+      </div>
+      <p class="meta">This review is on ${esc(outside)}, so the response isn't posted from here. Copy it, post it on ${esc(outside)}${r.source_url ? ` (<a href="${esc(r.source_url)}" target="_blank" rel="noopener">open the review</a>)` : ""}, then click Mark as responded.</p>`}`;
+  } else if (answered) {
     replyBlock = `<label class="lbl">Posted reply</label><div class="posted-reply">${esc(r.reply_text || "")}</div>
       <p class="meta">${r.reply_time ? "Replied " + ago(r.reply_time) : ""}</p>`;
   } else if (r.status === "dismissed") {
@@ -361,7 +381,8 @@ function renderDetail(data) {
 
   $("#detail").innerHTML = `
     <div class="detail-head">
-      <div><h2>${esc(storeName(r.rooftop_key))}</h2><p class="meta">${r.reviewer_name ? `<b class="reviewer-name">${esc(r.reviewer_name)}</b>, ` : ""}${new Date(r.create_time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</p></div>
+      <div><h2>${esc(storeName(r.rooftop_key))}</h2><p class="meta">${r.reviewer_name ? `<b class="reviewer-name">${esc(r.reviewer_name)}</b>, ` : ""}${outside ? new Date(r.create_time).toLocaleDateString(undefined, { timeZone: "America/New_York", dateStyle: "medium" }) : new Date(r.create_time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</p>
+        ${outside ? `<p class="meta"><span class="pill source">${esc(outside)}</span>${r.source_url ? ` <a href="${esc(r.source_url)}" target="_blank" rel="noopener">View on ${esc(outside)}</a>` : ""}</p>` : ""}</div>
       <div class="head-actions">
         ${canAct && escalation && escalation.ready && escalation.teams ? `<button class="btn escalate" id="escalateBtn">${r.escalation_open ? "Follow up" : "Escalate"}</button>` : ""}
         ${linkOnly ? "" : `<button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button>`}
@@ -373,20 +394,35 @@ function renderDetail(data) {
     ${reason}
     ${replyBlock}
     ${escalationBlock(r, escalation, canAct)}
+    ${notesBlock(r, data.notes, data.canNote, canReply)}
     ${linkOnly ? "" : staffBlock(data.staff)}
     <div class="history"><h3>History</h3>
       ${events.length ? `<ol>${events.map((e) => `<li><b>${esc(eventLabel(e.action))}</b> by ${esc(e.actor)}, ${ago(e.at)}${e.detail ? ". " + esc(e.detail) : ""}</li>`).join("")}</ol>` : `<p class="meta">No actions yet.</p>`}
-    </div>`;
+    </div>
+    ${outside && canAct ? `<div class="actions" style="margin-top:14px"><button class="btn quiet danger" id="deleteManual">Delete this review (added by hand)</button></div>` : ""}`;
 
   $("#detail").querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => act(r.id, b.dataset.act, b)));
   bindStaffBlock(r, data.staff);
+  bindNotes(r);
+  if ($("#copyReply")) $("#copyReply").onclick = async () => {
+    try { await navigator.clipboard.writeText($("#replyText").value); toast("Copied. Paste it on " + outside + "."); }
+    catch { $("#replyText").select(); toast("Press Ctrl+C to copy", true); }
+  };
+  if ($("#deleteManual")) $("#deleteManual").onclick = async () => {
+    if (!confirm("Delete this review? It and its escalation records, notes and history are removed from the dashboard. Emails already sent aren't affected.")) return;
+    try {
+      await api(`/api/reviews/${encodeURIComponent(r.id)}/deletemanual`, { method: "POST" });
+      toast("Deleted"); closeDetail(); state.rows = state.rows.filter((x) => x.id !== r.id); renderList(false); refreshCounts();
+    } catch (err) { toast(err.message, true); }
+  };
   const escBtn = $("#escalateBtn");
   if (escBtn) escBtn.onclick = () => renderEscalate(state.detail);
 }
 
 function eventLabel(a) {
   return { drafted: "Drafted", edited: "Edited", approved: "Approved", posted: "Posted", dismissed: "Dismissed", reopened: "Reopened",
-    escalated: "Emailed the team", escalation_resolved: "Marked resolved", staff_tagged: "Staff tag" }[a] || a;
+    escalated: "Emailed the team", escalation_resolved: "Marked resolved", staff_tagged: "Staff tag",
+    added: "Added", responded: "Marked responded", note_added: "Added a note", note_removed: "Removed a note" }[a] || a;
 }
 
 async function act(id, action, btn) {
@@ -406,7 +442,7 @@ async function act(id, action, btn) {
     const data = await api(`/api/reviews/${encodeURIComponent(id)}/${action}`, { method: "POST", body });
     renderDetail(data);
     const r = data.review;
-    toast({ approve: r.status === "approved_posted" ? "Reply posted to Google" : "Reply approved", save: "Edits saved", redraft: "New draft written", dismiss: "Review dismissed", reopen: "Moved back to inbox", resolve: "Escalation marked resolved" }[action]);
+    toast({ approve: r.status === "approved_posted" ? "Reply posted to Google" : "Reply approved", save: "Edits saved", redraft: "New draft written", dismiss: "Review dismissed", reopen: "Moved back to inbox", resolve: "Escalation marked resolved", responded: "Marked as responded" }[action]);
     const i = state.rows.findIndex((x) => x.id === id);
     if (i >= 0) state.rows[i] = r;
     if (state.view === "inbox") state.rows = state.rows.filter((x) => OPEN_STATUSES.includes(x.status));
@@ -418,6 +454,81 @@ async function act(id, action, btn) {
     buttons.forEach((b) => (b.disabled = false));
     btn.textContent = old;
   }
+}
+
+/* ---------- Management notes ---------- */
+
+function notesBlock(r, notes, canNote, canReply) {
+  if (notes === null || notes === undefined) return "";
+  if (!notes.length && !canNote) return "";
+  const list = notes.length ? `<ol class="notes">${notes.map((n) => `<li><div class="note-meta"><span><b>${esc(n.author_name || n.author)}</b>, ${ago(n.created_at)}</span>
+      ${n.author === state.me.email || state.me.role === "admin" ? `<button class="btn quiet danger" data-delnote="${n.id}">Remove</button>` : ""}</div>
+      <div class="note-body">${esc(n.body)}</div></li>`).join("")}</ol>` : `<p class="meta">No notes yet.</p>`;
+  return `<div class="esc-block notes-block"><h3>Management notes</h3>
+    <p class="meta">Background from the store team, for writing an accurate reply. Internal only; never posted.</p>
+    ${list}
+    ${canNote ? `<label class="sr" for="noteText">Add a note</label>
+      <textarea id="noteText" rows="4" placeholder="Paste what the manager said, or type background on what happened and what was done."></textarea>
+      <div class="actions"><button class="btn" id="addNote">Add note</button>
+      ${canReply && notes.length ? `<button class="btn primary" id="draftNotes">Draft a reply with these notes</button>` : ""}</div>` : ""}
+  </div>`;
+}
+
+function bindNotes(r) {
+  const call = async (action, body, msg, btn) => {
+    if (btn) { btn.disabled = true; if (action === "draftnotes") btn.textContent = "Writing\u2026"; }
+    try { renderDetail(await api(`/api/reviews/${encodeURIComponent(r.id)}/${action}`, { method: "POST", body })); toast(msg); }
+    catch (err) { toast(err.message, true); if (btn) { btn.disabled = false; btn.textContent = action === "draftnotes" ? "Draft a reply with these notes" : btn.textContent; } }
+  };
+  if ($("#addNote")) $("#addNote").onclick = (e) => {
+    const body = $("#noteText").value.trim();
+    if (!body) return toast("Paste or type the note first.", true);
+    call("note", { body }, "Note added", e.target);
+  };
+  if ($("#draftNotes")) $("#draftNotes").onclick = (e) => call("draftnotes", {}, "New draft written using the notes. Review it before approving.", e.target);
+  $("#detail").querySelectorAll("[data-delnote]").forEach((b) => (b.onclick = () => {
+    if (confirm("Remove this note?")) call("delnote", { note_id: +b.dataset.delnote }, "Note removed", b);
+  }));
+}
+
+/* ---------- Manual escalation (reviews from other sites) ---------- */
+
+function openManualEscalation() {
+  const stores = state.me.rooftops.filter((x) => x.key !== "other");
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const d = $("#detail");
+  d.hidden = false;
+  document.querySelector(".shell").classList.add("with-detail");
+  state.selected = null;
+  d.innerHTML = `
+    <div class="detail-head"><div><h2>Manual escalation</h2><p class="meta">A review from another site, step 1 of 2</p></div>
+      <button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button></div>
+    <label class="field">Store<select id="mStore"><option value="">Pick a store\u2026</option>${stores.map((x) => `<option value="${esc(x.key)}" ${state.rooftop === x.key ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
+    <label class="field">Where was it posted?<select id="mSource"><option value="">Pick a site\u2026</option>${(state.me.sources || []).map((x) => `<option>${esc(x)}</option>`).join("")}<option>Other</option></select></label>
+    <label class="field" id="mOtherWrap" hidden>Site name<input id="mOther" placeholder="For example, Nextdoor"></label>
+    <div class="esc-fields">
+      <label class="field">Star rating<select id="mStars"><option value="0">No rating</option>${[5, 4, 3, 2, 1].map((n) => `<option value="${n}">${n} star${n === 1 ? "" : "s"}</option>`).join("")}</select></label>
+      <label class="field">Date posted<input type="date" id="mDate" value="${today}" max="${today}"></label>
+    </div>
+    <label class="field">Reviewer name (optional)<input id="mName" autocomplete="off"></label>
+    <label class="field">Link to the review (optional)<input id="mUrl" type="url" placeholder="https://"></label>
+    <label class="field">Full review<textarea id="mText" rows="8" placeholder="Paste the whole review here"></textarea></label>
+    <div class="actions"><button class="btn primary" id="mNext">Next: escalation details</button><button class="btn quiet" onclick="closeDetail()">Cancel</button></div>
+    <p class="meta">It's added to that store's reviews, then you fill in the escalation email like any other escalation.</p>`;
+  $("#mSource").onchange = () => { $("#mOtherWrap").hidden = $("#mSource").value !== "Other"; };
+  $("#mNext").onclick = async (e) => {
+    const body = { rooftop: $("#mStore").value, source: $("#mSource").value, source_other: $("#mOther").value, stars: $("#mStars").value,
+      date: $("#mDate").value, reviewer_name: $("#mName").value, url: $("#mUrl").value, text: $("#mText").value };
+    if (!body.rooftop) return toast("Pick a store.", true);
+    if (!body.source || (body.source === "Other" && !body.source_other.trim())) return toast("Pick where the review was posted.", true);
+    if (!body.text.trim()) return toast("Paste the review text.", true);
+    e.target.disabled = true;
+    try {
+      const { id } = await api("/api/reviews", { method: "POST", body });
+      refreshCounts();
+      await openDetail(id, true);
+    } catch (err) { toast(err.message, true); e.target.disabled = false; }
+  };
 }
 
 /* ---------- Escalations ---------- */
@@ -854,13 +965,27 @@ function bindRoster() {
 async function renderStats() {
   const v = $("#view");
   closeDetail();
-  const days = state.statsDays;
+  const days = state.statsDays; // -1 means custom range
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
   const range = `<div class="filters"><label for="sDays" class="sr">Time range</label>
-    <select id="sDays">${[[30, "Last 30 days"], [90, "Last 90 days"], [365, "Last 12 months"], [0, "All time"]]
-      .map(([d, l]) => `<option value="${d}" ${d === days ? "selected" : ""}>${l}</option>`).join("")}</select></div>`;
-  v.innerHTML = range + `<div class="empty-state">Crunching the numbers\u2026</div>`;
-  $("#sDays").onchange = (e) => { state.statsDays = parseInt(e.target.value, 10); renderStats(); };
-  const q = new URLSearchParams({ days: String(days) });
+    <select id="sDays">${[[30, "Last 30 days"], [90, "Last 90 days"], [365, "Last 12 months"], [0, "All time"], [-1, "Custom range\u2026"]]
+      .map(([d, l]) => `<option value="${d}" ${d === days ? "selected" : ""}>${l}</option>`).join("")}</select>
+    ${days === -1 ? `<div class="custom-range">
+      <label>From <input type="date" id="sStart" value="${esc(state.statsStart)}" max="${today}"></label>
+      <label>To <input type="date" id="sEnd" value="${esc(state.statsEnd)}" max="${today}"></label></div>` : ""}</div>`;
+  const bindRange = () => {
+    $("#sDays").onchange = (e) => { state.statsDays = parseInt(e.target.value, 10); renderStats(); };
+    const dates = () => {
+      let a = $("#sStart").value, b = $("#sEnd").value;
+      if (a && b && a > b) [a, b] = [b, a];
+      state.statsStart = a; state.statsEnd = b; renderStats();
+    };
+    if ($("#sStart")) { $("#sStart").onchange = dates; $("#sEnd").onchange = dates; }
+  };
+  v.innerHTML = range + `<div class="empty-state">${days === -1 && !state.statsStart && !state.statsEnd ? "Pick a start and end date." : "Crunching the numbers\u2026"}</div>`;
+  bindRange();
+  if (days === -1 && !state.statsStart && !state.statsEnd) return;
+  const q = new URLSearchParams(days === -1 ? { days: "0", start: state.statsStart, end: state.statsEnd } : { days: String(days) });
   if (state.rooftop) q.set("rooftop", state.rooftop);
   let s;
   try { s = await api(`/api/stats?${q}`); } catch (e) {
@@ -870,7 +995,7 @@ async function renderStats() {
   const o = s.overall;
   if (!o.total) {
     v.innerHTML = range + `<div class="empty-state"><strong>No reviews in this range</strong>Pick a longer time range or another store.</div>`;
-    $("#sDays").onchange = (e) => { state.statsDays = parseInt(e.target.value, 10); renderStats(); };
+    bindRange();
     return;
   }
   const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
@@ -914,11 +1039,13 @@ async function renderStats() {
         <span>Directly in Google</span><div class="bar"><span style="width:${pct(o.by_google, replied)}%;background:var(--muted)"></span></div><span>${o.by_google || 0}</span>
       </div></div>
     </div></div>`;
-  $("#sDays").onchange = (e) => { state.statsDays = parseInt(e.target.value, 10); renderStats(); };
+  bindRange();
   v.querySelectorAll("[data-open-unanswered]").forEach((b) => (b.onclick = () => {
     // Open All reviews filtered to the same unanswered reviews this number counts
     if (b.dataset.openUnanswered) state.rooftop = b.dataset.openUnanswered;
-    state.filters = { status: "open", stars: "", q: "", days: state.statsDays ? String(state.statsDays) : "", start: "", end: "" };
+    state.filters = state.statsDays === -1
+      ? { status: "open", stars: "", q: "", days: "custom", start: state.statsStart, end: state.statsEnd, source: "google" }
+      : { status: "open", stars: "", q: "", days: state.statsDays ? String(state.statsDays) : "", start: "", end: "", source: "google" };
     renderRail();
     setView("all");
   }));

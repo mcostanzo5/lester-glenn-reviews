@@ -203,6 +203,12 @@ async function backfill(env: Env, client: GBPClient, locs: Loc[], budget: Budget
 /** Draft one review and save the result. Returns the new status. */
 export async function draftAndRoute(env: Env, r: ReviewRow, actor = "agent", forceReview = false, budget: Budget = unlimited()): Promise<Status> {
   const d = await draftReply(env, r.stars, r.text, rooftopFor(r.rooftop_key, r.location_title), budget, (r as any).reviewer_name);
+  // A temporary Claude error during a scheduled or manual run: leave it waiting and try again next run
+  if (!d.ok && d.retryable && actor === "agent") {
+    await env.DB.prepare("UPDATE reviews SET status='new', route_reason=? WHERE id=?")
+      .bind(`Draft will be retried on the next run (${d.risk_flags[0] || "temporary error"})`.slice(0, 300), r.id).run();
+    return "new";
+  }
   const decision = route(r.stars, r.text, d, num(env.AUTO_POST_MIN_STARS, 4));
   const status: Status = forceReview || decision.action === "review" ? "pending" : "ready";
   await env.DB.prepare(

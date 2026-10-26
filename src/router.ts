@@ -27,6 +27,7 @@ export interface DraftResult {
   risk_level: string;
   risk_flags: string[];
   reply: string;
+  retryable?: boolean; // a temporary Claude error: try again on the next run
 }
 
 export function route(stars: number, text: string, d: DraftResult, minStars: number): { action: "auto" | "review"; reason: string } {

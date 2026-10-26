@@ -18,6 +18,7 @@ export interface Env {
   RUN_HOURS_ET: string;
   HISTORY_START?: string;
   AUTO_POST?: string;
+  SELF_URL?: string; // this Worker's own address, used to hand scheduled runs to the pinned location
   GBP_CLIENT_ID?: string;
   GBP_CLIENT_SECRET?: string;
   GBP_REFRESH_TOKEN?: string;
@@ -38,7 +39,9 @@ export type Status =
   | "replied_external" // someone replied directly in Google
   | "dismissed"        // manager chose not to reply here
   | "old_unanswered"   // older than the drafting window, no reply
-  | "error";
+  | "error"
+  | "external"         // added by hand from another site (Yelp, DealerRater...), not responded yet
+  | "external_done";   // responded to on that site
 
 export const ANSWERED: Status[] = ["auto_posted", "approved_posted", "replied_external"];
 

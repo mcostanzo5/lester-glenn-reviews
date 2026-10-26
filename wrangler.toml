@@ -1,6 +1,12 @@
 name = "lester-glenn-reviews"
 main = "src/index.ts"
 compatibility_date = "2026-09-01"
+# Lets scheduled runs reach this Worker's own address (see SELF_URL below)
+compatibility_flags = ["global_fetch_strictly_public"]
+
+# Run near AWS us-east-1 (Virginia) so calls to Claude always come from the U.S.
+[placement]
+region = "aws:us-east-1"
 
 # Dashboard files. Every request goes through the Worker first so nobody
 # sees the dashboard without signing in with Microsoft.
@@ -48,6 +54,8 @@ RUN_HOURS_ET = "8,12,16,20"
 EXTERNAL_REQUEST_BUDGET = "45"
 # Pages of older reviews (50 each) imported per run for statistics
 BACKFILL_PAGES_PER_RUN = "20"
+# This Worker's own address. Scheduled runs hand off to it so they run in the pinned location.
+SELF_URL = "https://lester-glenn-reviews.marketing-c09.workers.dev"
 # Don't import reviews older than this (Eastern time). Older ones already saved stay.
 HISTORY_START = "2024-01-01"
 
