@@ -176,9 +176,27 @@ export async function sendEscalation(env: Env, r: ReviewRow, input: EscalationIn
     `${CONCERN_LABEL[input.concern]} sent to ${input.recipients.length} ${input.recipients.length === 1 ? "person" : "people"}${followups ? `, follow-up #${followups}` : ""}`);
 }
 
-export async function resolveEscalation(env: Env, r: ReviewRow, user: User) {
+export const OUTCOMES: Record<string, string> = {
+  contacted: "Customer contacted",
+  fixed: "Issue resolved",
+  updated: "Customer updated the review",
+  removed: "Customer removed the review",
+  unreachable: "Couldn't reach the customer",
+  other: "Other",
+};
+
+export async function resolveEscalation(env: Env, r: ReviewRow, user: User, outcome?: string, note?: string) {
   await env.DB.prepare("UPDATE reviews SET escalation_open = 0, escalation_resolved_at = ? WHERE id = ?").bind(nowIso(), r.id).run();
-  await logEvent(env, r.id, user.email, "escalation_resolved");
+  const key = outcome && OUTCOMES[outcome] ? outcome : null;
+  const text = (note || "").trim().slice(0, 1000);
+  if (key) {
+    try {
+      await env.DB.prepare("UPDATE reviews SET escalation_outcome = ? WHERE id = ?").bind(key, r.id).run();
+      await env.DB.prepare("INSERT INTO escalation_outcomes (review_id, rooftop_key, outcome, note, decided_by, decided_at, escalated_at) VALUES (?,?,?,?,?,?,?)")
+        .bind(r.id, r.rooftop_key, key, text || null, user.email, nowIso(), r.escalation_first_at || null).run();
+    } catch { /* migration 0010 */ }
+  }
+  await logEvent(env, r.id, user.email, "escalation_resolved", key ? OUTCOMES[key] + (text ? `: ${text}` : "") : "");
 }
 
 /** The last escalation's details for pre-filling a follow-up, or null. */

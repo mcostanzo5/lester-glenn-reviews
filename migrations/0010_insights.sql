@@ -1,0 +1,12 @@
+ALTER TABLE reviews ADD COLUMN draft_original TEXT;
+ALTER TABLE reviews ADD COLUMN topics_scanned_at TEXT;
+ALTER TABLE reviews ADD COLUMN escalation_outcome TEXT;
+CREATE TABLE IF NOT EXISTS draft_edits (id INTEGER PRIMARY KEY AUTOINCREMENT, review_id TEXT NOT NULL, rooftop_key TEXT, stars INTEGER, original TEXT NOT NULL, final TEXT NOT NULL, editor TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS escalation_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT, review_id TEXT NOT NULL, rooftop_key TEXT, outcome TEXT NOT NULL, note TEXT, decided_by TEXT, decided_at TEXT NOT NULL, escalated_at TEXT);
+CREATE TABLE IF NOT EXISTS rating_changes (id INTEGER PRIMARY KEY AUTOINCREMENT, review_id TEXT NOT NULL, rooftop_key TEXT, old_stars INTEGER, new_stars INTEGER, changed_at TEXT NOT NULL, after_escalation INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS review_topics (id INTEGER PRIMARY KEY AUTOINCREMENT, review_id TEXT NOT NULL, rooftop_key TEXT, review_time TEXT, stars INTEGER, kind TEXT NOT NULL, label TEXT NOT NULL, sentiment TEXT);
+CREATE INDEX IF NOT EXISTS idx_topics_review ON review_topics(review_id);
+CREATE INDEX IF NOT EXISTS idx_topics_label ON review_topics(kind, label);
+CREATE INDEX IF NOT EXISTS idx_topics_time ON review_topics(review_time);
+CREATE INDEX IF NOT EXISTS idx_outcomes_time ON escalation_outcomes(decided_at);
+CREATE INDEX IF NOT EXISTS idx_rating_changes_review ON rating_changes(review_id);

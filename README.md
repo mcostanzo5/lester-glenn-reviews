@@ -16,6 +16,7 @@ same review.
 | `src/router.ts` | Rules for what can auto-post, including the keyword list that always goes to a manager |
 | `src/guidelines.ts` | Built-in starter guidelines, plus the safety rules that always apply |
 | `src/staff.ts` | Finds employee names in reviews, matches them to each store's roster, tallies by month |
+| `src/backup.ts` | Weekly backup of the database to SharePoint |
 | `src/learn.ts` | Writes new guidelines from your team's real replies (Settings > Reply guidelines) |
 | `src/rooftops.ts` | Store names, sign-offs, contacts, and phone numbers (blank phone = no phone in replies) |
 | `src/api.ts` | Dashboard API and statistics |
@@ -198,7 +199,7 @@ out. If a token stops working, the dashboard asks them to sign out and back in.
 **One-time setup**
 1. Run the SQL in `migrations/0003_escalations.sql` in the D1 console. Run it
    once only (a second run gives harmless "duplicate column" errors). Then run
-   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql`.
+   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql` and `migrations/0010_insights.sql`.
 2. IT adds two **delegated** Microsoft Graph permissions to the Lester Glenn
    Reviews app registration, **Mail.Send** and **offline_access**, and clicks
    **Grant admin consent**. Delegated Mail.Send only allows sending as the person
@@ -230,6 +231,52 @@ Two reasons you might still upgrade to Workers Paid ($5 a month): the free plan
 also caps CPU time at 10 ms per run, which heavy history-import runs can brush
 against (check the Worker's Metrics page for "Exceeded CPU" errors), and on paid
 you can set `EXTERNAL_REQUEST_BUDGET = "900"` so history imports in one run.
+
+## Topics and word clouds
+
+When reviews are read for staff names, Claude also tags each one with themes
+(from a fixed list: Sales experience, Pricing and fees, Financing and F&I, Wait
+time, Communication, and so on) and up to 5 short key phrases ("oil change", "no
+pressure", "hidden fees"), each marked positive, negative or neutral. The
+**Topics** tab shows a word cloud for the store picked in the left panel (or all
+stores) and a range of months: bigger words come up in more reviews, green means
+mostly positive, red mostly negative. Click a word or theme for how many reviews
+mention it, its share of reviews, its month-by-month trend, and the reviews
+themselves. For older months, click **Read reviews now** on the Topics or Staff tab.
+
+## Escalation outcomes and recovered reviews
+
+Marking an escalation resolved asks what happened (customer contacted, issue
+resolved, customer updated the review, customer removed the review, couldn't
+reach the customer, other) plus an optional note. The agent also records every
+star-rating change. Statistics shows how escalations were resolved, the average
+days to resolve, and **recovered reviews**: escalated reviews whose rating went up
+afterward or that were removed, with a recovery rate per store.
+
+## Learning from edits
+
+Claude's original draft is kept. When an approver changes it before approving,
+the before-and-after is saved. **Settings > Reply guidelines > Suggest updates
+from our edits** has Claude look for patterns in those changes and propose
+updated guidelines, with a summary of what it noticed. Nothing changes until you
+save.
+
+## Weekly backup
+
+Every Sunday at 8pm Eastern (and on demand from Settings), the whole database is
+saved to a SharePoint folder: a full backup (`.json.gz`) and a reviews spreadsheet
+(`.csv`). The last `BACKUP_KEEP` weeks (default 12) are kept. Notes and escalation
+details stay encrypted in the backup; stored Microsoft sign-ins are never included.
+Needs Workers Paid, since packaging the database takes more processing than the
+free plan allows per request.
+
+Setup:
+1. IT adds the **delegated** Microsoft Graph permission **Files.ReadWrite.All**
+   to the app registration and grants admin consent.
+2. Then set `BACKUP_SITE` in wrangler.toml to the SharePoint site (for example
+   `lesterglenn.sharepoint.com/sites/Marketing`) and deploy. Don't set it before
+   step 1, or sign-in will ask for a permission that hasn't been approved.
+3. `BACKUP_USER` signs out and back in once. The folder is created on the first backup.
 
 ## Removed reviews
 

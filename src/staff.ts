@@ -16,6 +16,15 @@ import { Budget, BudgetExhausted } from "./budget";
 export type StaffRole = "sales" | "service" | "other";
 export interface Staff { id: number; rooftop_key: string; full_name: string; role: StaffRole; aliases: string; active: number }
 interface Found { name: string; role: string; sentiment: string }
+interface Topic { label: string; sentiment: string }
+interface Extracted { mentions: Found[]; themes: Topic[]; phrases: Topic[] }
+
+// Fixed theme list, so trends can be compared month to month and store to store
+export const THEMES = [
+  "Sales experience", "Pricing and fees", "Financing and F&I", "Trade-in", "Service quality", "Wait time",
+  "Communication", "Staff friendliness", "Scheduling", "Parts availability", "Vehicle condition",
+  "Facility and cleanliness", "Loaner and shuttle", "Warranty and recalls", "Delivery", "Follow-up",
+];
 
 const BATCH = 25;          // reviews per Claude call
 const MAX_TEXT = 1500;     // characters of each review sent
@@ -68,11 +77,22 @@ Keep each name exactly as written, for example "Mike", "Mike S.", or "Michael Sm
 role: "sales" for sales or finance, "service" for service advisors, technicians, service or parts staff, "other" for anyone else, "unknown" if the review doesn't say.
 sentiment: how the review talks about that person: "positive", "negative", or "neutral".
 
-Respond with ONLY JSON, no preamble:
-{"results":[{"i":0,"mentions":[{"name":"Mike","role":"sales","sentiment":"positive"}]}]}
-Include one entry for every review i you were given, with "mentions": [] when no employee is named.`;
+Also tag what each review is about:
+themes: 1 to 4 that apply, chosen ONLY from this list: ${THEMES.join("; ")}.
+  Each with sentiment "positive", "negative", or "neutral" for how the review feels about that theme.
+phrases: up to 5 short key phrases (1 to 3 words, lowercase) for the specific things the review talks
+  about, written generically so the same idea gets the same words across reviews, for example
+  "oil change", "wait time", "no pressure", "hidden fees", "loaner car", "paperwork", "friendly staff".
+  Never include people's names, vehicle identification numbers, phone numbers, or prices.
+  Each with sentiment "positive", "negative", or "neutral".
 
-async function extract(env: Env, items: { i: number; text: string }[], budget: Budget): Promise<Map<number, Found[]>> {
+Respond with ONLY JSON, no preamble:
+{"results":[{"i":0,"mentions":[{"name":"Mike","role":"sales","sentiment":"positive"}],
+  "themes":[{"label":"Sales experience","sentiment":"positive"}],
+  "phrases":[{"label":"no pressure","sentiment":"positive"}]}]}
+Include one entry for every review i you were given, with empty lists when nothing applies.`;
+
+async function extract(env: Env, items: { i: number; text: string }[], budget: Budget): Promise<Map<number, Extracted>> {
   if (!env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is not set.");
   budget.take();
   const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -80,7 +100,7 @@ async function extract(env: Env, items: { i: number; text: string }[], budget: B
     headers: { "x-api-key": env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
     body: JSON.stringify({
       model: env.CLAUDE_MODEL || "claude-sonnet-5",
-      max_tokens: 4000,
+      max_tokens: 8000,
       system: EXTRACT_PROMPT,
       messages: [{ role: "user", content: JSON.stringify(items) }],
     }),
@@ -93,19 +113,43 @@ async function extract(env: Env, items: { i: number; text: string }[], budget: B
   const raw = (data.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
   const body = raw.replace(/^```(?:json)?|```$/gm, "").trim();
   const parsed = JSON.parse(body.slice(body.indexOf("{"), body.lastIndexOf("}") + 1));
-  const out = new Map<number, Found[]>();
+  const out = new Map<number, Extracted>();
+  const sent = (v: any) => (["positive", "negative", "neutral"].includes(String(v)) ? String(v) : "neutral");
   for (const r of parsed.results || []) {
     const seen = new Set<string>();
-    out.set(Number(r.i), (r.mentions || [])
-      .map((m: any) => ({ name: String(m.name || "").trim().slice(0, 60), role: String(m.role || "unknown"), sentiment: String(m.sentiment || "neutral") }))
-      .filter((m: Found) => norm(m.name) && !seen.has(norm(m.name)) && seen.add(norm(m.name))));
+    const mentions = (r.mentions || [])
+      .map((m: any) => ({ name: String(m.name || "").trim().slice(0, 60), role: String(m.role || "unknown"), sentiment: sent(m.sentiment) }))
+      .filter((m: Found) => norm(m.name) && !seen.has(norm(m.name)) && seen.add(norm(m.name)));
+    const themeSeen = new Set<string>();
+    const themes = (r.themes || []).map((t: any) => ({ label: THEMES.find((x) => x.toLowerCase() === String(t.label || "").toLowerCase()) || "", sentiment: sent(t.sentiment) }))
+      .filter((t: Topic) => t.label && !themeSeen.has(t.label) && themeSeen.add(t.label)).slice(0, 4);
+    const phraseSeen = new Set<string>();
+    const phrases = (r.phrases || []).map((t: any) => ({ label: cleanPhrase(t.label), sentiment: sent(t.sentiment) }))
+      .filter((t: Topic) => t.label && !phraseSeen.has(t.label) && phraseSeen.add(t.label)).slice(0, 5);
+    out.set(Number(r.i), { mentions, themes, phrases });
   }
   return out;
 }
 
-/** Reads unscanned reviews (newest first) and records who they mention. */
+/** Lowercase 1-3 word phrase, no digits or stray punctuation. */
+function cleanPhrase(v: unknown): string {
+  const p = String(v || "").toLowerCase().replace(/[^a-z&' -]/g, " ").replace(/\s+/g, " ").trim();
+  const words = p.split(" ").filter(Boolean);
+  return words.length && words.length <= 3 && p.length <= 30 ? words.join(" ") : "";
+}
+
+let topicsReady: boolean | null = null;
+async function hasTopics(env: Env): Promise<boolean> {
+  if (topicsReady) return true;
+  try { await env.DB.prepare("SELECT topics_scanned_at FROM reviews LIMIT 1").first(); await env.DB.prepare("SELECT 1 FROM review_topics LIMIT 1").first(); topicsReady = true; }
+  catch { topicsReady = false; }
+  return topicsReady;
+}
+
+/** Reads unscanned reviews (newest first): who they mention, and what they're about. */
 export async function scanReviews(env: Env, budget: Budget, opts: { from?: string; to?: string; rooftops?: string[] | "*"; maxBatches: number }) {
-  const where = ["mentions_scanned_at IS NULL"];
+  const topics = await hasTopics(env);
+  const where = [topics ? "(mentions_scanned_at IS NULL OR topics_scanned_at IS NULL)" : "mentions_scanned_at IS NULL"];
   const args: unknown[] = [];
   if (mode(env) !== "dry_run") where.push("is_sample = 0");
   if (opts.from) { where.push("create_time >= ?"); args.push(opts.from); }
@@ -119,7 +163,7 @@ export async function scanReviews(env: Env, budget: Budget, opts: { from?: strin
     const rows = (await env.DB.prepare(`${sql} ORDER BY create_time DESC LIMIT ?`).bind(...args, BATCH).all<any>()).results;
     if (!rows.length) break;
     const withText = rows.filter((r) => (r.text || "").trim());
-    let results = new Map<number, Found[]>();
+    let results = new Map<number, Extracted>();
     if (withText.length) {
       if (!budget.has(1)) break;
       results = await extract(env, withText.map((r, i) => ({ i, text: String(r.text).slice(0, MAX_TEXT) })), budget);
@@ -127,7 +171,8 @@ export async function scanReviews(env: Env, budget: Budget, opts: { from?: strin
     const writes: D1PreparedStatement[] = [];
     for (const r of rows) {
       const i = withText.indexOf(r);
-      const mentions = i >= 0 ? results.get(i) || [] : [];
+      const got = i >= 0 ? results.get(i) : undefined;
+      const mentions = got?.mentions || [];
       if (!rosters.has(r.rooftop_key)) rosters.set(r.rooftop_key, await rosterFor(env, r.rooftop_key));
       const kept = (await env.DB.prepare("SELECT name_raw FROM mentions WHERE review_id = ? AND match IN ('manual','ignored')").bind(r.id).all<{ name_raw: string }>())
         .results.map((m) => norm(m.name_raw));
@@ -140,6 +185,16 @@ export async function scanReviews(env: Env, budget: Budget, opts: { from?: strin
         found++;
       }
       writes.push(env.DB.prepare("UPDATE reviews SET mentions_scanned_at = ? WHERE id = ?").bind(nowIso(), r.id));
+      if (topics) {
+        writes.push(env.DB.prepare("DELETE FROM review_topics WHERE review_id = ?").bind(r.id));
+        for (const [kind, list] of [["theme", got?.themes || []], ["phrase", got?.phrases || []]] as const) {
+          for (const t of list) {
+            writes.push(env.DB.prepare("INSERT INTO review_topics (review_id, rooftop_key, review_time, stars, kind, label, sentiment) VALUES (?,?,?,?,?,?,?)")
+              .bind(r.id, r.rooftop_key, r.create_time, r.stars, kind, t.label, t.sentiment));
+          }
+        }
+        writes.push(env.DB.prepare("UPDATE reviews SET topics_scanned_at = ? WHERE id = ?").bind(nowIso(), r.id));
+      }
       scanned++;
     }
     await env.DB.batch(writes);

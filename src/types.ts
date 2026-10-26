@@ -18,7 +18,11 @@ export interface Env {
   RUN_HOURS_ET: string;
   HISTORY_START?: string;
   AUTO_POST?: string;
-  SELF_URL?: string; // this Worker's own address, used to hand scheduled runs to the pinned location
+  SELF_URL?: string;
+  BACKUP_SITE?: string;   // e.g. lesterglenn.sharepoint.com/sites/Marketing
+  BACKUP_FOLDER?: string;
+  BACKUP_USER?: string;   // whose Microsoft sign-in saves the files
+  BACKUP_KEEP?: string; // this Worker's own address, used to hand scheduled runs to the pinned location
   GBP_CLIENT_ID?: string;
   GBP_CLIENT_SECRET?: string;
   GBP_REFRESH_TOKEN?: string;

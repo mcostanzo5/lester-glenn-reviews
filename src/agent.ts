@@ -28,8 +28,8 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
   if (!reviews.length) return 0;
   const ids = reviews.map((r) => r.id);
   const existing = new Map(
-    (await env.DB.prepare(`SELECT id, status, update_time, reply_source, text, route_reason FROM reviews WHERE id IN (${ids.map(() => "?").join(",")})`)
-      .bind(...ids).all<{ id: string; status: Status; update_time: string; reply_source: string | null; text: string; route_reason: string | null }>()).results.map((r) => [r.id, r])
+    (await env.DB.prepare(`SELECT id, status, update_time, reply_source, text, route_reason, stars, rooftop_key, escalation_count FROM reviews WHERE id IN (${ids.map(() => "?").join(",")})`)
+      .bind(...ids).all<{ id: string; status: Status; update_time: string; reply_source: string | null; text: string; route_reason: string | null; stars: number; rooftop_key: string; escalation_count: number }>()).results.map((r) => [r.id, r])
   );
   const stmt = env.DB.prepare(
     `INSERT INTO reviews (id, location_name, rooftop_key, location_title, stars, text, create_time, update_time,
@@ -78,6 +78,16 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
       status, g.reply_text, g.reply_time, replySource, nowIso());
   });
   await env.DB.batch(writes);
+  // Star rating changes (a 2 that became a 5 after the store reached out is a recovered review)
+  for (const g of reviews) {
+    const ex = existing.get(g.id);
+    if (!ex || !ex.stars || !g.stars || ex.stars === g.stars) continue;
+    try {
+      await env.DB.prepare("INSERT INTO rating_changes (review_id, rooftop_key, old_stars, new_stars, changed_at, after_escalation) VALUES (?,?,?,?,?,?)")
+        .bind(g.id, ex.rooftop_key, ex.stars, g.stars, g.update_time || nowIso(), (ex.escalation_count || 0) > 0 ? 1 : 0).run();
+    } catch { /* migration 0010 */ }
+    await logEvent(env, g.id, "agent", "rating_changed", `${ex.stars} star${ex.stars === 1 ? "" : "s"} to ${g.stars} star${g.stars === 1 ? "" : "s"}`);
+  }
   for (const id of restoredByEdit) {
     await env.DB.prepare("UPDATE reviews SET route_reason = NULL WHERE id = ?").bind(id).run();
     await logEvent(env, id, "agent", "restored", "The reviewer changed the review text, so it's back from removed");
@@ -288,6 +298,24 @@ async function auditSweep(env: Env, client: GBPClient, locs: Loc[], budget: Budg
   if (removed) notes.push(`Found ${removed} older review${removed === 1 ? "" : "s"} no longer on Google, marked as removed.`);
 }
 
+/** Keeps Claude's draft as written, so later edits by approvers can be learned from. */
+export async function rememberOriginal(env: Env, id: string, draft: string | null | undefined) {
+  if (!draft) return;
+  try { await env.DB.prepare("UPDATE reviews SET draft_original = ? WHERE id = ?").bind(draft, id).run(); } catch { /* migration 0010 */ }
+}
+
+/** If the posted reply differs from Claude's draft, save the pair for "Suggest updates from our edits". */
+export async function recordEdit(env: Env, r: ReviewRow, finalText: string, editor: string) {
+  try {
+    const row = await env.DB.prepare("SELECT draft_original FROM reviews WHERE id = ?").bind(r.id).first<{ draft_original: string | null }>();
+    const orig = row?.draft_original;
+    const norm = (x: string) => x.replace(/\s+/g, " ").trim();
+    if (!orig || norm(orig) === norm(finalText)) return;
+    await env.DB.prepare("INSERT INTO draft_edits (review_id, rooftop_key, stars, original, final, editor, created_at) VALUES (?,?,?,?,?,?,?)")
+      .bind(r.id, r.rooftop_key, r.stars, orig, finalText, editor, nowIso()).run();
+  } catch { /* migration 0010 */ }
+}
+
 export const HAND_REMOVED = "Marked removed by hand";
 export const isHandRemoved = (reason: string | null | undefined) => !!reason && reason.startsWith(HAND_REMOVED);
 
@@ -339,6 +367,7 @@ export async function draftAndRoute(env: Env, r: ReviewRow, actor = "agent", for
   await env.DB.prepare(
     `UPDATE reviews SET draft=?, department=?, sentiment=?, risk_level=?, risk_flags=?, route_reason=?, status=? WHERE id=?`
   ).bind(d.reply || null, d.department, d.sentiment, d.risk_level, JSON.stringify(d.risk_flags), decision.reason, status, r.id).run();
+  await rememberOriginal(env, r.id, d.reply);
   await logEvent(env, r.id, actor, "drafted", decision.reason);
   return status;
 }
@@ -393,7 +422,7 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
     const sampleClause = m === "dry_run" ? "" : " AND is_sample = 0";
     const limit = Math.min(num(env.MAX_DRAFTS_PER_RUN, 25), Math.floor(budget.left / perDraft));
     if (limit > 0) {
-      const waiting = (await env.DB.prepare(`SELECT * FROM reviews WHERE status='new'${sampleClause} ORDER BY create_time DESC LIMIT ?`)
+      const waiting = (await env.DB.prepare(`SELECT * FROM reviews WHERE (status='new' OR (status='pending' AND draft IS NULL AND route_reason LIKE 'Drafting problem: Claude API error%'))${sampleClause} ORDER BY create_time DESC LIMIT ?`)
         .bind(limit).all<ReviewRow>()).results;
       await inBatches(waiting, 5, async (r) => {
         const st = await draftAndRoute(env, r, "agent", false, budget);

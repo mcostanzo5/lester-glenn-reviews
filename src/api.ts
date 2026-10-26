@@ -4,11 +4,12 @@ import { canAct, canSee, wasRecipient } from "./auth";
 import { ROOFTOPS, DEFAULT_ROOFTOP } from "./rooftops";
 import { GBPClient, GBPError } from "./gbp";
 import { cleanReply } from "./drafter";
-import { draftAndRoute, HAND_REMOVED, isHandRemoved, logEvent, markRemoved, postReply, runAgent } from "./agent";
+import { draftAndRoute, HAND_REMOVED, isHandRemoved, logEvent, markRemoved, postReply, recordEdit, rememberOriginal, runAgent } from "./agent";
 import { clearSamples, loadSamples } from "./samples";
-import { availableReplies, learnGuidelines, MIN_REPLIES } from "./learn";
+import { backupConfigured, lastBackup, runBackup } from "./backup";
+import { availableReplies, editStats, learnGuidelines, MIN_REPLIES, suggestFromEdits } from "./learn";
 import { clearGuidelinesCache, currentGuidelines } from "./guidelines";
-import { CONCERN_LABEL, FIELDS_FOR, TEAMS_FOR, buildEmail, lastEscalation, getTeams, parseEscalation, resolveEscalation, saveTeams, sendEscalation, type Team } from "./escalate";
+import { CONCERN_LABEL, FIELDS_FOR, OUTCOMES, TEAMS_FOR, buildEmail, lastEscalation, getTeams, parseEscalation, resolveEscalation, saveTeams, sendEscalation, type Team } from "./escalate";
 import { Budget } from "./budget";
 import { canTag, etDayStart, monthRange, norm, parseRosterLines, rematch, scanReviews, type Staff } from "./staff";
 import { draftReply } from "./drafter";
@@ -133,6 +134,10 @@ async function listReviews(env: Env, user: User, url: URL) {
   const stars = url.searchParams.get("stars");
   if (stars === "low") where.push("stars <= 3");
   else if (stars === "high") where.push("stars >= 4");
+  const topic = url.searchParams.get("topic"), topicKind = url.searchParams.get("topickind");
+  if (topic && (topicKind === "theme" || topicKind === "phrase")) {
+    where.push("id IN (SELECT review_id FROM review_topics WHERE kind = ? AND label = ?)"); args.push(topicKind, topic);
+  }
   const staffId = parseInt(url.searchParams.get("staff") || "", 10);
   if (staffId) { where.push("id IN (SELECT review_id FROM mentions WHERE staff_id = ? AND match IN ('auto','manual'))"); args.push(staffId); }
   const range = monthRange(url.searchParams.get("from") || "", url.searchParams.get("to") || "");
@@ -186,6 +191,7 @@ async function draftWithNotes(env: Env, r: ReviewRow, user: User, requireNotes: 
   const status = source ? "external" : "pending";
   await env.DB.prepare("UPDATE reviews SET draft=?, department=?, sentiment=?, risk_level=?, risk_flags=?, route_reason=?, status=? WHERE id=?")
     .bind(d.reply, d.department, d.sentiment, d.risk_level, JSON.stringify(d.risk_flags), reason, status, r.id).run();
+  await rememberOriginal(env, r.id, d.reply);
   await logEvent(env, r.id, user.email, "drafted", reason);
   return null;
 }
@@ -227,6 +233,7 @@ async function reassignReview(env: Env, user: User, r: ReviewRow, rooftop: strin
   // Staff names get matched against the new store's roster
   try {
     await env.DB.prepare("DELETE FROM mentions WHERE review_id = ?").bind(r.id).run();
+    try { await env.DB.prepare("UPDATE review_topics SET rooftop_key = ? WHERE review_id = ?").bind(target, r.id).run(); } catch { /* 0010 */ }
     await env.DB.prepare("UPDATE reviews SET mentions_scanned_at = NULL WHERE id = ?").bind(r.id).run();
   } catch { /* staff tables not set up */ }
   await logEvent(env, r.id, user.email, "reassigned", back ? "Moved back to the Auto Group listing" : `Moved to ${rooftopFor(target).name}`);
@@ -353,6 +360,7 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
     return fail(`This review is on ${(r as any).source}, so it can't be posted from here. Copy the reply, post it there, then click Mark as responded.`);
   } else if (action === "responded") {
     if (!outside) return fail("Only reviews from other sites are marked as responded by hand.");
+    if (reply) await recordEdit(env, r, reply, user.email);
     await env.DB.prepare("UPDATE reviews SET status='external_done', draft=COALESCE(?, draft), reply_text=COALESCE(?, draft), reply_time=?, reply_source='manager', decided_by=?, decided_at=? WHERE id=?")
       .bind(reply || null, reply || null, nowIso(), user.email, nowIso(), id).run();
     await logEvent(env, id, user.email, "responded", `Responded on ${(r as any).source}`);
@@ -360,6 +368,7 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
     if (!reply) return fail("Write a reply before approving.");
     if (["auto_posted", "approved_posted", "replied_external"].includes(r.status)) return fail("This review already has a reply.");
     await env.DB.prepare("UPDATE reviews SET draft=?, decided_by=?, decided_at=? WHERE id=?").bind(reply, user.email, nowIso(), id).run();
+    await recordEdit(env, r, reply, user.email);
     if (mode(env) === "live" && !r.is_sample) {
       try { await postReply(env, new GBPClient(env), r, reply, user.email, "manager"); }
       catch (e) {
@@ -392,7 +401,8 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
       return fail((e as Error).message, e instanceof MailError ? 502 : 500);
     }
   } else if (action === "resolve") {
-    await resolveEscalation(env, r, user);
+    if (!OUTCOMES[String(body?.outcome || "")]) return fail("Pick what happened with this escalation.");
+    await resolveEscalation(env, r, user, String(body.outcome), String(body?.note || ""));
   } else if (action === "redraft" && outside) {
     const err = await draftWithNotes(env, r, user, false);
     if (err) return fail(err, 502);
@@ -431,12 +441,12 @@ async function stats(env: Env, user: User, url: URL) {
   const parts = [s.sql];
   const args: unknown[] = [...s.args];
   const range = dayRange(url.searchParams.get("start") || "", url.searchParams.get("end") || "");
-  if (range.start || range.end) {
-    if (range.start) { parts.push("create_time >= ?"); args.push(range.start); }
-    if (range.end) { parts.push("create_time < ?"); args.push(range.end); }
-  } else if (days > 0) {
-    parts.push("create_time >= ?"); args.push(new Date(Date.now() - days * 86400_000).toISOString());
-  }
+  // The same window applies to escalations (by when they were first sent and resolved)
+  let from: string | null = null, to: string | null = null;
+  if (range.start || range.end) { from = range.start; to = range.end; }
+  else if (days > 0) from = new Date(Date.now() - days * 86400_000).toISOString();
+  if (from) { parts.push("create_time >= ?"); args.push(from); }
+  if (to) { parts.push("create_time < ?"); args.push(to); }
   // Statistics are about Google reviews; reviews added by hand from other sites are left out
   if (await hasSourceCol(env)) parts.push("source IS NULL");
   parts.push("status != 'removed'");
@@ -468,7 +478,66 @@ async function stats(env: Env, user: User, url: URL) {
     rooftops: (byRooftop.results as any[]).map((r) => ({ ...r, name: names[r.rooftop_key] || r.rooftop_key })),
     monthly: monthly.results,
     stars: starsDist.results,
+    escalations: await escalationStats(env, user, url.searchParams.get("rooftop"), from, to, names),
   });
+}
+
+/** Themes and key phrases across reviews for a range of calendar months (Topics tab). */
+async function topicsApi(env: Env, user: User, path: string, url: URL): Promise<Response> {
+  const range = monthRange(url.searchParams.get("from") || "", url.searchParams.get("to") || "");
+  if (!range) return fail("Pick a valid month range.");
+  const s = scope(user, env, url.searchParams.get("rooftop"));
+  const rs = s.sql.replace(/\brooftop_key\b/g, "r.rooftop_key").replace(/\bis_sample\b/g, "r.is_sample");
+  const base = `FROM review_topics t JOIN reviews r ON r.id = t.review_id WHERE ${rs} AND r.status != 'removed' AND t.review_time >= ? AND t.review_time < ?`;
+  const args = [...s.args, range[0], range[1]];
+  const counts = `COUNT(DISTINCT t.review_id) AS total, SUM(t.sentiment = 'positive') AS positive, SUM(t.sentiment = 'negative') AS negative, SUM(t.sentiment = 'neutral') AS neutral`;
+  try {
+    if (path === "/api/topics/detail") {
+      const kind = url.searchParams.get("kind"), label = url.searchParams.get("label") || "";
+      if (kind !== "theme" && kind !== "phrase") return fail("Unknown topic.");
+      const monthly = (await env.DB.prepare(`SELECT strftime('%Y-%m', t.review_time) AS month, ${counts} ${base} AND t.kind = ? AND t.label = ?
+        GROUP BY month ORDER BY month`).bind(...args, kind, label).all()).results;
+      return json({ kind, label, monthly });
+    }
+    const [themes, phrases, cov] = await env.DB.batch([
+      env.DB.prepare(`SELECT t.label, ${counts} ${base} AND t.kind = 'theme' GROUP BY t.label ORDER BY total DESC`).bind(...args),
+      env.DB.prepare(`SELECT t.label, ${counts} ${base} AND t.kind = 'phrase' GROUP BY t.label ORDER BY total DESC LIMIT 80`).bind(...args),
+      env.DB.prepare(`SELECT COUNT(*) AS total, SUM(topics_scanned_at IS NOT NULL) AS scanned FROM reviews
+        WHERE ${s.sql} AND status != 'removed' AND length(trim(text)) > 0 AND create_time >= ? AND create_time < ?`).bind(...args),
+    ]);
+    return json({ ready: true, themes: themes.results, phrases: phrases.results, coverage: cov.results[0] });
+  } catch { return json({ ready: false }); } // migration 0010 not run yet
+}
+
+/** Outcomes of resolved escalations, and how many escalated reviews were recovered
+ *  (rating went up afterward, or the review was removed). */
+async function escalationStats(env: Env, user: User, rooftop: string | null, from: string | null, to: string | null, names: Record<string, string>) {
+  try {
+    const s = scope(user, env, rooftop);
+    const win = (col: string) => `${from ? ` AND ${col} >= ?` : ""}${to ? ` AND ${col} < ?` : ""}`;
+    const wargs = [...(from ? [from] : []), ...(to ? [to] : [])];
+    const recovered = `(r.status = 'removed' OR EXISTS (SELECT 1 FROM rating_changes rc WHERE rc.review_id = r.id AND rc.after_escalation = 1 AND rc.new_stars > rc.old_stars))`;
+    const rs = s.sql.replace(/\brooftop_key\b/g, "r.rooftop_key").replace(/\bis_sample\b/g, "r.is_sample");
+    const os = s.sql.replace(/\bis_sample = 0( AND )?/, "").replace(/\brooftop_key\b/g, "o.rooftop_key") || "1=1";
+    const osArgs = s.sql.includes("is_sample") ? s.args : s.args;
+    const [outcomes, byStore, list] = await env.DB.batch([
+      env.DB.prepare(`SELECT o.outcome, COUNT(*) AS n, ROUND(AVG(julianday(o.decided_at) - julianday(o.escalated_at)), 1) AS avg_days
+        FROM escalation_outcomes o WHERE ${os}${win("o.decided_at")} GROUP BY o.outcome ORDER BY n DESC`).bind(...osArgs, ...wargs),
+      env.DB.prepare(`SELECT r.rooftop_key, COUNT(*) AS escalated, SUM(${recovered}) AS recovered
+        FROM reviews r WHERE ${rs} AND r.escalation_count > 0${win("r.escalation_first_at")} GROUP BY r.rooftop_key`).bind(...s.args, ...wargs),
+      env.DB.prepare(`SELECT r.id, r.rooftop_key, r.stars, r.status, r.escalation_first_at,
+          (SELECT rc.old_stars FROM rating_changes rc WHERE rc.review_id = r.id AND rc.after_escalation = 1 ORDER BY rc.id LIMIT 1) AS from_stars
+        FROM reviews r WHERE ${rs} AND r.escalation_count > 0 AND ${recovered}${win("r.escalation_first_at")}
+        ORDER BY r.escalation_first_at DESC LIMIT 20`).bind(...s.args, ...wargs),
+    ]);
+    const stores = (byStore.results as any[]).map((x) => ({ ...x, name: names[x.rooftop_key] || x.rooftop_key }));
+    const escalated = stores.reduce((a, x) => a + x.escalated, 0), rec = stores.reduce((a, x) => a + (x.recovered || 0), 0);
+    return {
+      ready: true, escalated, recovered: rec,
+      outcomes: (outcomes.results as any[]).map((o) => ({ ...o, label: OUTCOMES[o.outcome] || o.outcome })),
+      stores, recent: list.results,
+    };
+  } catch { return { ready: false }; } // migration 0010 not run yet
 }
 
 async function admin(env: Env, user: User, req: Request, path: string, url: URL, body: any) {
@@ -506,7 +575,16 @@ async function admin(env: Env, user: User, req: Request, path: string, url: URL,
     try { meta = await env.DB.prepare("SELECT updated_by, updated_at FROM settings WHERE key = 'guidelines'").first(); }
     catch { return json({ text: g.text, custom: false, needsSetup: true, available: 0, minReplies: MIN_REPLIES }); }
     return json({ text: g.text, custom: g.custom, updatedBy: meta?.updated_by, updatedAt: meta?.updated_at,
-      available: await availableReplies(env), minReplies: MIN_REPLIES });
+      available: await availableReplies(env), minReplies: MIN_REPLIES, edits: await editStats(env, meta?.updated_at) });
+  }
+  if (path === "/api/admin/backup") {
+    if (req.method === "POST") return json(await runBackup(env, `manual:${user.email}`));
+    return json({ configured: backupConfigured(env), site: env.BACKUP_SITE || "", folder: env.BACKUP_FOLDER || "Review Dashboard Backups",
+      user: env.BACKUP_USER || (env.ADMIN_EMAILS || "").split(",")[0], last: await lastBackup(env) });
+  }
+  if (path === "/api/admin/guidelines/fromedits" && req.method === "POST") {
+    const r = await suggestFromEdits(env, (await currentGuidelines(env, true)).text);
+    return r.error ? fail(r.error, 400) : json(r);
   }
   if (path === "/api/admin/guidelines/learn" && req.method === "POST") {
     const r = await learnGuidelines(env, body?.source === "pasted" ? "pasted" : "google", String(body?.text || ""));
@@ -577,6 +655,7 @@ export async function handleApi(req: Request, env: Env, user: User): Promise<Res
   if (path === "/api/stats") return stats(env, user, url);
   if (path.startsWith("/api/admin/")) return admin(env, user, req, path, url, body);
   if (path.startsWith("/api/staff")) return staffApi(env, user, req, path, url, body);
+  if (path.startsWith("/api/topics")) return topicsApi(env, user, path, url);
   const m = path.match(/^\/api\/reviews\/([^/]+)(?:\/([a-z]+))?$/);
   if (m) {
     const id = decodeURIComponent(m[1]);

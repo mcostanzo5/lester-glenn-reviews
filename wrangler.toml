@@ -56,6 +56,13 @@ EXTERNAL_REQUEST_BUDGET = "45"
 BACKFILL_PAGES_PER_RUN = "20"
 # This Worker's own address. Scheduled runs hand off to it so they run in the pinned location.
 SELF_URL = "https://lester-glenn-reviews.marketing-c09.workers.dev"
+# Weekly backup to SharePoint. Leave BACKUP_SITE blank until IT has added the
+# Files.ReadWrite.All permission (see README), then set it, e.g.
+# BACKUP_SITE = "lesterglenn.sharepoint.com/sites/Marketing"
+BACKUP_SITE = ""
+BACKUP_FOLDER = "Review Dashboard Backups"
+BACKUP_USER = "mcostanzo@lesterglenn.com"
+BACKUP_KEEP = "12"
 # Don't import reviews older than this (Eastern time). Older ones already saved stay.
 HISTORY_START = "2024-01-01"
 

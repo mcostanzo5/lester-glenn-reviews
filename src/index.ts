@@ -4,6 +4,7 @@ import { identify } from "./auth";
 import { callback, login, logout, msConfigured, page, sessionEmail } from "./msauth";
 import { handleApi, json } from "./api";
 import { runAgent } from "./agent";
+import { backupConfigured, runBackup } from "./backup";
 
 /** Secret header value that lets a scheduled run hand its work to this Worker's own address. */
 async function internalToken(env: Env): Promise<string> {
@@ -31,6 +32,11 @@ export default {
     const local = url.hostname === "localhost" && !!env.DEV_AUTH_EMAIL;
 
     // A scheduled run handing its work to the pinned location (see scheduled() below)
+    if (url.pathname === "/__backup" && req.method === "POST") {
+      const given = req.headers.get("x-internal-run") || "";
+      if (!given || !sameSecret(given, await internalToken(env))) return new Response("Not found", { status: 404 });
+      return new Response(JSON.stringify(await runBackup(env, "schedule")), { headers: { "content-type": "application/json" } });
+    }
     if (url.pathname === "/__scheduled-run" && req.method === "POST") {
       const given = req.headers.get("x-internal-run") || "";
       if (!given || !sameSecret(given, await internalToken(env))) return new Response("Not found", { status: 404 });
@@ -68,6 +74,15 @@ export default {
     if (mode(env) === "dry_run") return;
     // Only run at the configured Eastern hours; the other cron wake-ups exit right away
     if (!isRunHour(event.scheduledTime, env.RUN_HOURS_ET)) return;
+    // Sunday's last run (8pm Eastern) also kicks off the weekly backup, in its own request
+    const et = new Date(event.scheduledTime);
+    const weekday = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" }).format(et);
+    const hour = Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hourCycle: "h23" }).format(et));
+    if (weekday === "Sun" && hour === 20 && backupConfigured(env) && env.SELF_URL) {
+      _ctx.waitUntil(fetch(`${env.SELF_URL.replace(/\/$/, "")}/__backup`, { method: "POST", headers: { "x-internal-run": await internalToken(env) } })
+        .then(async (r) => console.log("backup", r.status, await r.text())).catch((e) => console.warn("backup failed", e)));
+    }
+
     // Cloudflare can start scheduled runs in any of its data centers, including ones in places
     // Claude doesn't serve. Hand the run to this Worker's own address, which is pinned to the
     // eastern U.S. by [placement] in wrangler.toml. If that fails, run here as before.

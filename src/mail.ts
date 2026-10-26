@@ -8,6 +8,31 @@ import { nowIso } from "./types";
 // they send. The email lands in their own Sent Items.
 
 export const GRAPH_SCOPES = "offline_access https://graph.microsoft.com/Mail.Send";
+export const FILES_SCOPE = "https://graph.microsoft.com/Files.ReadWrite.All";
+
+/** What sign-in asks Microsoft for. File access is only requested once a backup site is set. */
+export function signInScopes(env: Env): string {
+  return `openid profile email ${GRAPH_SCOPES}${env.BACKUP_SITE ? " " + FILES_SCOPE : ""}`;
+}
+
+/** A short-lived Microsoft Graph token for this person with the given permission, using their stored sign-in. */
+export async function graphTokenFor(env: Env, email: string, scope: string): Promise<string> {
+  const refresh = await loadRefreshToken(env, email);
+  if (!refresh) throw new MailError(`${email} needs to sign out of the dashboard and back in once, so Microsoft grants file access.`, true);
+  const res = await fetch(`${LOGIN_BASE}/${env.MS_TENANT_ID}/oauth2/v2.0/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: env.MS_CLIENT_ID, client_secret: env.MS_CLIENT_SECRET!, grant_type: "refresh_token", refresh_token: refresh, scope: `offline_access ${scope}` }),
+  });
+  const data: any = await res.json().catch(() => ({}));
+  if (!res.ok || !data.access_token) {
+    throw new MailError(data.error === "invalid_grant" || data.error === "interaction_required"
+      ? `${email} needs to sign out of the dashboard and back in once (Microsoft asked for a fresh sign-in).`
+      : `Microsoft didn't allow file access (${data.error || res.status}). IT may need to add the Files.ReadWrite.All permission.`, true);
+  }
+  if (data.refresh_token) await storeRefreshToken(env, email, data.refresh_token);
+  return data.access_token;
+}
 const LOGIN_BASE = "https://login.microsoftonline.com";
 const GRAPH = "https://graph.microsoft.com/v1.0";
 

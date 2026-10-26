@@ -80,7 +80,10 @@ export async function draftReply(env: Env, stars: number, text: string, rooftop:
   try {
     if (!res.ok) {
       const err: any = await res.json().catch(() => ({}));
-      return failed(`Claude API error ${res.status}: ${String(err?.error?.message || "no details").slice(0, 200)}`, RETRYABLE.includes(res.status));
+      const msg = String(err?.error?.message || "no details");
+      // Spend limits and low credit clear up once the limit resets or is raised, so wait and retry
+      const waitable = RETRYABLE.includes(res.status) || /usage limit|credit balance|spend limit/i.test(msg);
+      return failed(`Claude API error ${res.status}: ${msg.slice(0, 200)}`, waitable);
     }
     const data: any = await res.json();
     const raw = (data.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("");

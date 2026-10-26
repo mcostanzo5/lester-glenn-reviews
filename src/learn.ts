@@ -115,3 +115,60 @@ export async function learnGuidelines(env: Env, source: "google" | "pasted", pas
   if (!draft.startsWith("#")) return { error: "Claude's response didn't look like guidelines. Try again." };
   return { draft, used };
 }
+
+/* ---------- Learning from approvers' edits ---------- */
+
+const EDITS_PROMPT = `You maintain the reply guidelines that a drafting assistant follows when writing
+public owner replies to Google reviews for Lester Glenn Auto Group.
+
+You'll receive the current guidelines and a set of drafts the assistant wrote next to the
+final versions the managers actually approved. Find the consistent patterns in how the
+managers change the drafts (things they always remove, add, shorten, soften, or reword),
+and ignore one-off edits that only fix a fact about a single review.
+
+Respond with ONLY a JSON object, no preamble:
+{"summary": ["one short sentence per pattern you found, most common first"],
+ "guidelines": "the full updated guidelines in Markdown, starting with the first heading"}
+
+Rules for the updated guidelines:
+- Keep the existing structure and anything the edits don't contradict.
+- Change only what the edits show the managers want done differently.
+- Never use em-dashes.
+- Don't invent policies, phone numbers, staff names, or promotions.
+
+${SAFETY_RULES}`;
+
+export async function editStats(env: Env, since?: string | null): Promise<{ total: number; since: number }> {
+  try {
+    const row = await env.DB.prepare("SELECT COUNT(*) AS total, SUM(created_at > ?) AS since FROM draft_edits").bind(since || "").first<{ total: number; since: number }>();
+    return { total: row?.total || 0, since: row?.since || 0 };
+  } catch { return { total: 0, since: 0 }; }
+}
+
+export async function suggestFromEdits(env: Env, currentGuidelines: string): Promise<{ draft?: string; summary?: string[]; used?: number; error?: string }> {
+  if (!env.ANTHROPIC_API_KEY) return { error: "ANTHROPIC_API_KEY is not set." };
+  let rows: { stars: number; original: string; final: string }[] = [];
+  try { rows = (await env.DB.prepare("SELECT stars, original, final FROM draft_edits ORDER BY id DESC LIMIT 60").all<any>()).results; }
+  catch { return { error: "One-time setup needed: run migrations/0010_insights.sql in the D1 console." }; }
+  if (rows.length < 5) return { error: `Only ${rows.length} edited replies are on file so far. Approve a few more edited drafts (at least 5) and try again.` };
+  const material = `CURRENT GUIDELINES:\n${currentGuidelines}\n\nEDITS (draft, then the approved version), one JSON object per line:\n` +
+    rows.map((r) => JSON.stringify({ stars: r.stars, draft: r.original, approved: r.final })).join("\n");
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: { "x-api-key": env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+    body: JSON.stringify({ model: env.CLAUDE_MODEL || "claude-sonnet-5", max_tokens: 6000, system: EDITS_PROMPT, messages: [{ role: "user", content: material }] }),
+  });
+  if (!res.ok) {
+    const err: any = await res.json().catch(() => ({}));
+    return { error: `Claude API error ${res.status}: ${String(err?.error?.message || "no details").slice(0, 200)}` };
+  }
+  try {
+    const data: any = await res.json();
+    const raw = (data.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("").replace(/^```(?:json)?|```$/gm, "").trim();
+    const parsed = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+    const draft = String(parsed.guidelines || "").replace(/\s*\u2014\s*/g, ", ").trim();
+    if (!draft.startsWith("#")) return { error: "Claude's response didn't look like guidelines. Try again." };
+    const summary = (parsed.summary || []).map((x: any) => String(x).replace(/\s*\u2014\s*/g, ", ")).slice(0, 10);
+    return { draft, summary, used: rows.length };
+  } catch { return { error: "Couldn't read Claude's response. Try again." }; }
+}

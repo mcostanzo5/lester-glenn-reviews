@@ -1,5 +1,5 @@
 import type { Env } from "./types";
-import { forgetRefreshToken, GRAPH_SCOPES, storeRefreshToken } from "./mail";
+import { forgetRefreshToken, signInScopes, storeRefreshToken } from "./mail";
 
 // Microsoft 365 sign-in, handled entirely by the Worker.
 // Flow: /auth/login sends the person to Microsoft, Microsoft sends them back to
@@ -98,7 +98,7 @@ export async function login(req: Request, env: Env): Promise<Response> {
     response_type: "code",
     redirect_uri: redirectUri(req),
     response_mode: "query",
-    scope: `openid profile email ${GRAPH_SCOPES}`,
+    scope: signInScopes(env),
     state,
     nonce,
     code_challenge: challenge,
@@ -162,7 +162,7 @@ export async function callback(req: Request, env: Env): Promise<Response> {
       code: url.searchParams.get("code") || "",
       redirect_uri: redirectUri(req),
       code_verifier: pending.v,
-      scope: `openid profile email ${GRAPH_SCOPES}`,
+      scope: signInScopes(env),
     }),
   });
   const data: any = await res.json().catch(() => ({}));
