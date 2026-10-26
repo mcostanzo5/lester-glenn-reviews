@@ -126,6 +126,7 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
   const maxAge = num(env.MAX_AGE_DAYS, 14);
   const cutoff = historyCutoff(env);
   let count = 0;
+  let removedCount = 0;
   for (const loc of locs) {
     if (!budget.has(1)) { notes.push(`Skipped ${loc.title} this run to stay under the request limit.`); continue; }
     try {
@@ -138,6 +139,11 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
         const fresh = loc.newest_seen ? page.reviews.filter((r) => r.update_time > loc.newest_seen!) : page.reviews;
         const hist = withinHistory(fresh, cutoff);
         count += await savePage(env, hist.keep, loc, maxAge);
+        // Anything we have from the stretch this page covers that Google no longer lists was deleted
+        if (p === 0 && !firstRun) {
+          const oldest = page.next && page.reviews.length ? page.reviews[page.reviews.length - 1].update_time : null;
+          removedCount += await reconcile(env, loc, page.reviews, oldest, null, [], cutoff);
+        }
         const reachedSeen = fresh.length < page.reviews.length;
         if (firstRun) {
           // Older pages are history; hand them to the backfill phase unless this page already reached the cutoff
@@ -155,6 +161,7 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
     }
     await saveLoc(env, loc);
   }
+  if (removedCount) notes.push(`${removedCount} recent review${removedCount === 1 ? "" : "s"} no longer on Google, marked as removed.`);
   return count;
 }
 
@@ -203,10 +210,69 @@ async function backfill(env: Env, client: GBPClient, locs: Loc[], budget: Budget
   return count;
 }
 
+/** Compares one page from Google with what we have for the same stretch of time.
+ *  Reviews we have with an update time inside (lower, upper] that Google didn't list are marked removed;
+ *  reviews Google lists that we'd marked removed are restored. Returns how many were marked removed. */
+async function reconcile(env: Env, loc: Loc, page: GReview[], lower: string | null, upper: string | null, skip: string[], cutoff: string): Promise<number> {
+  const onPage = new Set(page.map((r) => r.id));
+  // Bring back anything on this page we'd marked removed (it reappeared, or was a false alarm)
+  const back = (await env.DB.prepare(`SELECT id FROM reviews WHERE status = 'removed' AND id IN (${page.map(() => "?").join(",") || "''"})`)
+    .bind(...page.map((r) => r.id)).all<{ id: string }>()).results;
+  if (back.length) {
+    const ids = new Set(back.map((b) => b.id));
+    await savePage(env, page.filter((r) => ids.has(r.id)), { ...loc }, num(env.MAX_AGE_DAYS, 14));
+    for (const b of back) await logEvent(env, b.id, "agent", "restored", "Listed on Google again");
+  }
+  const where = ["location_name = ?", "id LIKE 'accounts/%'", "status != 'removed'", "update_time >= ?"];
+  const args: unknown[] = [loc.name, cutoff];
+  if (lower) { where.push("update_time > ?"); args.push(lower); }
+  if (upper) { where.push("update_time <= ?"); args.push(upper); }
+  const ours = (await env.DB.prepare(`SELECT id FROM reviews WHERE ${where.join(" AND ")}`).bind(...args).all<{ id: string }>()).results;
+  let n = 0;
+  for (const r of ours) {
+    if (onPage.has(r.id) || skip.includes(r.id)) continue;
+    await markRemoved(env, r.id, "agent");
+    n++;
+  }
+  return n;
+}
+
+/** Walks each listing's review pages a few at a time, comparing them with what we have, so reviews
+ *  deleted long after they were posted are caught too. Bookmarks live in the settings table. */
+async function auditSweep(env: Env, client: GBPClient, locs: Loc[], budget: Budget, maxPages: number, notes: string[]) {
+  const done = locs.filter((l) => l.backfill_done);
+  if (!done.length || maxPages <= 0) return;
+  const cutoff = historyCutoff(env);
+  const getSetting = async (k: string) => (await env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(k).first<{ value: string }>())?.value;
+  const setSetting = (k: string, v: string) => env.DB.prepare(`INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?,?, 'agent', ?)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).bind(k, v, nowIso()).run();
+  let start: number;
+  try { start = parseInt((await getSetting("audit:next")) || "0", 10) || 0; } catch { return; } // settings table not set up
+  let removed = 0, pages = 0, i = start;
+  while (pages < maxPages && budget.has(1)) {
+    const loc = done[i % done.length];
+    i++;
+    const key = `audit:${loc.name}`;
+    const cur: { token: string | null; upper: string | null; skip: string[] } = JSON.parse((await getSetting(key)) || '{"token":null,"upper":null,"skip":[]}');
+    const page = await client.reviewPage(loc.account, loc.name, cur.token || undefined);
+    pages++;
+    const last = page.reviews[page.reviews.length - 1];
+    const pastCutoff = !page.next || page.reviews.some((r) => r.update_time < cutoff);
+    const lower = !pastCutoff && last ? last.update_time : null;
+    removed += await reconcile(env, loc, page.reviews, lower, cur.upper, cur.skip, cutoff);
+    if (pastCutoff || !last) await env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(key).run(); // sweep finished; start over next time
+    else await setSetting(key, JSON.stringify({ token: page.next, upper: last.update_time, skip: page.reviews.filter((r) => r.update_time === last.update_time).map((r) => r.id) }));
+    if (i - start >= done.length * 4) break; // safety: don't loop forever on tiny listings
+  }
+  await setSetting("audit:next", String(i % done.length));
+  if (removed) notes.push(`Found ${removed} older review${removed === 1 ? "" : "s"} no longer on Google, marked as removed.`);
+}
+
 /** Marks a review as removed from Google. */
 export async function markRemoved(env: Env, id: string, actor: string) {
-  await env.DB.prepare("UPDATE reviews SET status='removed', route_reason=?, checked_at=? WHERE id=?")
-    .bind(`Removed from Google (found ${new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" })})`, nowIso(), id).run();
+  const reason = `Removed from Google (found ${new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" })})`;
+  try { await env.DB.prepare("UPDATE reviews SET status='removed', route_reason=?, checked_at=? WHERE id=?").bind(reason, nowIso(), id).run(); }
+  catch { await env.DB.prepare("UPDATE reviews SET status='removed', route_reason=? WHERE id=?").bind(reason, id).run(); }
   await logEvent(env, id, actor, "removed", "No longer on Google: deleted by the reviewer or taken down");
 }
 
@@ -216,10 +282,11 @@ async function verifyStillOnGoogle(env: Env, client: GBPClient, budget: Budget, 
   let rows: { id: string }[];
   try {
     rows = (await env.DB.prepare(
-      `SELECT id FROM reviews WHERE is_sample = 0 AND id LIKE 'accounts/%'
-         AND (status IN ('new','pending','ready','approved','error','old_unanswered') OR escalation_open > 0)
-         AND status != 'removed'
-       ORDER BY checked_at IS NOT NULL, checked_at ASC LIMIT ?`).bind(max).all<{ id: string }>()).results;
+      `SELECT id FROM reviews WHERE is_sample = 0 AND id LIKE 'accounts/%' AND status != 'removed'
+         AND (escalation_count > 0 OR status IN ('new','pending','ready','approved','error')
+              OR (status = 'old_unanswered' AND create_time >= ?))
+       ORDER BY (escalation_count > 0) DESC, checked_at IS NOT NULL, checked_at ASC LIMIT ?`)
+      .bind(etDayStart(`${new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }).slice(0, 4)}-01-01`), max).all<{ id: string }>()).results;
   } catch { return; } // migration 0009 not run yet
   let gone = 0;
   for (const r of rows) {
@@ -344,6 +411,12 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
 
     // 5. Older history for statistics, using whatever budget is left
     if (client && locs.length) s.synced += await backfill(env, client, locs, budget, s.notes);
+
+    // 6. Rolling sweep for reviews deleted from older pages, with what's left
+    if (client && locs.length && budget.left > 2) {
+      try { await auditSweep(env, client, locs, budget, Math.min(12, budget.left - 2), s.notes); }
+      catch (e) { if (e instanceof BudgetExhausted) throw e; }
+    }
   } catch (e) {
     if (e instanceof BudgetExhausted) s.notes.push(e.message);
     else { s.errors++; s.notes.push((e as Error).message); }
