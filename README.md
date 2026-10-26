@@ -233,13 +233,26 @@ you can set `EXTERNAL_REQUEST_BUDGET = "900"` so history imports in one run.
 
 ## Removed reviews
 
-Google's list only shows reviews that still exist, so each run also looks up a
-few reviews that still need attention (Inbox and open escalations), least
-recently checked first. Any that are gone are marked **Removed from Google**
-and drop out of the Inbox, Statistics and staff tallies; find them in All
-reviews with the "Removed from Google" filter. **Check on Google** on a review
-checks it right away. If a removed review shows up on Google again, it's
-restored.
+Google's list only includes reviews that still exist, so the agent watches for
+reviews that disappear, whether answered or not:
+- **Every run, at no extra cost:** each listing's newest page (which the agent
+  downloads anyway) is compared with what we have for the same stretch of time.
+- **A rolling sweep:** leftover requests each run walk older pages back to
+  `HISTORY_START`, rotating through listings, so older deletions are caught
+  within a few days.
+- **Direct lookups:** a few reviews per run are looked up one by one, escalated
+  reviews first, since those are often deleted after a store resolves them.
+
+Removed reviews drop out of the Inbox, Statistics and staff tallies; find them in
+All reviews with the "Removed from Google" filter. **Check on Google** on a
+review checks it right away. A review that shows up on Google again is restored
+automatically.
+
+Google's Business Profile API sometimes keeps listing a review for a while after
+it's gone from the public profile. When you know a review is gone, click **Mark
+as removed**: it stays removed even while Google's system still lists it, and
+**Undo removed** brings it back. If the reviewer later changes the review text,
+it comes back automatically, since that means it's a live review again.
 
 ## Auto Group reviews about a specific store
 

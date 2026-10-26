@@ -28,8 +28,8 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
   if (!reviews.length) return 0;
   const ids = reviews.map((r) => r.id);
   const existing = new Map(
-    (await env.DB.prepare(`SELECT id, status, update_time, reply_source, text FROM reviews WHERE id IN (${ids.map(() => "?").join(",")})`)
-      .bind(...ids).all<{ id: string; status: Status; update_time: string; reply_source: string | null; text: string }>()).results.map((r) => [r.id, r])
+    (await env.DB.prepare(`SELECT id, status, update_time, reply_source, text, route_reason FROM reviews WHERE id IN (${ids.map(() => "?").join(",")})`)
+      .bind(...ids).all<{ id: string; status: Status; update_time: string; reply_source: string | null; text: string; route_reason: string | null }>()).results.map((r) => [r.id, r])
   );
   const stmt = env.DB.prepare(
     `INSERT INTO reviews (id, location_name, rooftop_key, location_title, stars, text, create_time, update_time,
@@ -41,11 +41,27 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
        status=excluded.status, reply_text=excluded.reply_text, reply_time=excluded.reply_time,
        reply_source=excluded.reply_source, synced_at=excluded.synced_at`
   );
+  const sameText = (a: string | null | undefined, b: string | null | undefined) =>
+    (a || "").replace(/\s+/g, " ").trim() === (b || "").replace(/\s+/g, " ").trim();
+  const restoredByEdit: string[] = [];
   const writes = reviews.map((g) => {
     const ex = existing.get(g.id);
     let status: Status;
     let replySource: string | null = ex?.reply_source ?? null;
-    if (g.reply_text) {
+    const handRemoved = !!ex && ex.status === "removed" && isHandRemoved(ex.route_reason);
+    if (handRemoved && sameText(ex!.text, g.text)) {
+      // Marked removed by hand and unchanged: Google's API can keep listing deleted reviews for a while
+      status = "removed";
+    } else if (handRemoved && g.reply_text) {
+      // The reviewer changed what they wrote, so it's a live review again
+      restoredByEdit.push(g.id);
+      status = "replied_external";
+      replySource = "google";
+    } else if (handRemoved) {
+      restoredByEdit.push(g.id);
+      status = isFresh(g, maxAge) ? "new" : "old_unanswered";
+      replySource = null;
+    } else if (g.reply_text) {
       const ours = ex && (ex.status === "auto_posted" || ex.status === "approved_posted");
       status = ours ? ex!.status : "replied_external";
       if (!ours) replySource = "google";
@@ -62,6 +78,10 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
       status, g.reply_text, g.reply_time, replySource, nowIso());
   });
   await env.DB.batch(writes);
+  for (const id of restoredByEdit) {
+    await env.DB.prepare("UPDATE reviews SET route_reason = NULL WHERE id = ?").bind(id).run();
+    await logEvent(env, id, "agent", "restored", "The reviewer changed the review text, so it's back from removed");
+  }
   // Reviews moved by hand to a specific store (from the Auto Group listing) stay there
   try { await env.DB.prepare(`UPDATE reviews SET rooftop_key = rooftop_override WHERE rooftop_override IS NOT NULL AND rooftop_key != rooftop_override AND id IN (${ids.map(() => "?").join(",")})`).bind(...ids).run(); }
   catch { /* migration 0009 not run yet */ }
@@ -216,7 +236,7 @@ async function backfill(env: Env, client: GBPClient, locs: Loc[], budget: Budget
 async function reconcile(env: Env, loc: Loc, page: GReview[], lower: string | null, upper: string | null, skip: string[], cutoff: string): Promise<number> {
   const onPage = new Set(page.map((r) => r.id));
   // Bring back anything on this page we'd marked removed (it reappeared, or was a false alarm)
-  const back = (await env.DB.prepare(`SELECT id FROM reviews WHERE status = 'removed' AND id IN (${page.map(() => "?").join(",") || "''"})`)
+  const back = (await env.DB.prepare(`SELECT id FROM reviews WHERE status = 'removed' AND (route_reason IS NULL OR route_reason NOT LIKE '${HAND_REMOVED}%') AND id IN (${page.map(() => "?").join(",") || "''"})`)
     .bind(...page.map((r) => r.id)).all<{ id: string }>()).results;
   if (back.length) {
     const ids = new Set(back.map((b) => b.id));
@@ -267,6 +287,9 @@ async function auditSweep(env: Env, client: GBPClient, locs: Loc[], budget: Budg
   await setSetting("audit:next", String(i % done.length));
   if (removed) notes.push(`Found ${removed} older review${removed === 1 ? "" : "s"} no longer on Google, marked as removed.`);
 }
+
+export const HAND_REMOVED = "Marked removed by hand";
+export const isHandRemoved = (reason: string | null | undefined) => !!reason && reason.startsWith(HAND_REMOVED);
 
 /** Marks a review as removed from Google. */
 export async function markRemoved(env: Env, id: string, actor: string) {

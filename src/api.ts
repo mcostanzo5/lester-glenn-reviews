@@ -4,7 +4,7 @@ import { canAct, canSee, wasRecipient } from "./auth";
 import { ROOFTOPS, DEFAULT_ROOFTOP } from "./rooftops";
 import { GBPClient, GBPError } from "./gbp";
 import { cleanReply } from "./drafter";
-import { draftAndRoute, logEvent, markRemoved, postReply, runAgent } from "./agent";
+import { draftAndRoute, HAND_REMOVED, isHandRemoved, logEvent, markRemoved, postReply, runAgent } from "./agent";
 import { clearSamples, loadSamples } from "./samples";
 import { availableReplies, learnGuidelines, MIN_REPLIES } from "./learn";
 import { clearGuidelinesCache, currentGuidelines } from "./guidelines";
@@ -200,14 +200,17 @@ async function verifyReview(env: Env, user: User, r: ReviewRow): Promise<Respons
     if (r.status !== "removed") await markRemoved(env, r.id, user.email);
   } else {
     try { await env.DB.prepare("UPDATE reviews SET checked_at=? WHERE id=?").bind(nowIso(), r.id).run(); } catch { /* migration 0009 */ }
-    if (r.status === "removed") {
+    if (r.status === "removed" && !isHandRemoved(r.route_reason)) {
       await env.DB.prepare("UPDATE reviews SET status=?, route_reason=NULL WHERE id=?").bind(r.reply_text ? "replied_external" : "new", r.id).run();
       await logEvent(env, r.id, user.email, "restored", "Back on Google");
     }
   }
   const d = await reviewDetail(env, user, r.id);
   const data: any = await d.json();
-  return json({ ...data, checked: exists ? "Still on Google." : "Not on Google anymore. Marked as removed." });
+  const msg = !exists ? "Not on Google anymore. Marked as removed."
+    : isHandRemoved(r.route_reason) ? "Google's system still lists this review, but it was marked removed by hand, so it stays removed."
+    : "Google's system still lists this review. If you know it's gone from the profile, use Mark as removed.";
+  return json({ ...data, checked: msg });
 }
 
 /** Moves a review on the Auto Group listing to the store it's really about (for stats, escalations and staff tags).
@@ -313,6 +316,22 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
   const r = await getReview(env, id);
   if (!r || !canSee(user, r.rooftop_key)) return fail("Review not found.", 404);
   const replyActions = ["save", "approve", "dismiss", "reopen", "redraft", "draftnotes", "responded"];
+  if (action === "markremoved" || action === "unremove") {
+    if (!(user.role === "admin" || user.canReply)) return fail("Only admins and reply approvers can do that.", 403);
+    if (action === "markremoved") {
+      if (r.status === "removed") return fail("This review is already marked as removed.");
+      await env.DB.prepare("UPDATE reviews SET status='removed', route_reason=?, decided_by=?, decided_at=? WHERE id=?")
+        .bind(`${HAND_REMOVED} (${user.name || user.email}, ${new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" })})`, user.email, nowIso(), id).run();
+      await logEvent(env, id, user.email, "removed", "Marked removed by hand");
+    } else {
+      if (r.status !== "removed") return fail("This review isn't marked as removed.");
+      const fresh = Date.parse(r.create_time) >= Date.now() - (parseInt(env.MAX_AGE_DAYS || "14", 10) || 14) * 86400_000;
+      const back = r.reply_text ? "replied_external" : r.draft ? "pending" : fresh ? "new" : "old_unanswered";
+      await env.DB.prepare("UPDATE reviews SET status=?, route_reason=NULL WHERE id=?").bind(back, id).run();
+      await logEvent(env, id, user.email, "restored", "Removed mark undone by hand");
+    }
+    return reviewDetail(env, user, id);
+  }
   if (action === "verify" || action === "reassign") {
     if (!(user.role === "admin" || user.canReply)) return fail("Only admins and reply approvers can do that.", 403);
     return action === "verify" ? verifyReview(env, user, r) : reassignReview(env, user, r, String(body?.rooftop || ""));

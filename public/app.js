@@ -339,7 +339,8 @@ function renderDetail(data) {
   const outside = r.source || "";
   let replyBlock = "";
   if (r.status === "removed") {
-    replyBlock = `<p class="reason removed-note"><b>No longer on Google.</b> The reviewer deleted it, or Google took it down, so it can't be replied to. It's left out of the Inbox, Statistics and staff tallies.</p>`;
+    replyBlock = `<p class="reason removed-note"><b>${/^Marked removed by hand/.test(r.route_reason || "") ? esc(r.route_reason) + "." : "No longer on Google."}</b>
+      It can't be replied to, and it's left out of the Inbox, Statistics and staff tallies.${/^Marked removed by hand/.test(r.route_reason || "") ? " It stays removed even if Google's system still lists it." : ""}</p>`;
   } else if (outside && r.status === "external_done") {
     replyBlock = `<label class="lbl">Response posted on ${esc(outside)}</label><div class="posted-reply">${esc(r.reply_text || r.draft || "(no text saved)")}</div>
       <p class="meta">${r.decided_by ? "Marked responded by " + esc(r.decided_by) + ", " : ""}${r.reply_time ? ago(r.reply_time) : ""}</p>
@@ -399,7 +400,9 @@ function renderDetail(data) {
       <button class="btn" id="reassignBtn">${data.reassign.moved ? "Update" : "Move"}</button></div>` : ""}
     <div>${stars(r.stars, "big-stars")}</div>
     ${linkOnly ? "" : `<div class="status-row">${pill(r.status, r.is_sample)}${r.id.startsWith("accounts/") && (state.me.role === "admin" || state.me.canReply)
-      ? ` <button class="btn quiet" id="verifyBtn" title="Ask Google whether this review still exists">Check on Google</button>` : ""}</div>`}
+      ? ` <button class="btn quiet" id="verifyBtn" title="Ask Google whether this review still exists">Check on Google</button>
+          ${r.status === "removed" ? `<button class="btn quiet" data-act="unremove">Undo removed</button>`
+            : `<button class="btn quiet" data-act="markremoved" title="Use when the review is gone from the Google profile but Google hasn't caught up">Mark as removed</button>`}` : ""}</div>`}
     <blockquote>${r.text ? esc(r.text) : "<em>Rating only, no written review</em>"}</blockquote>
     ${reason}
     ${replyBlock}
@@ -460,6 +463,7 @@ async function act(id, action, btn) {
   const body = {};
   const ta = $("#replyText");
   if (ta) body.reply = ta.value;
+  if (action === "markremoved" && !confirm("Mark this review as removed from Google? It leaves the Inbox, Statistics and staff tallies, and stays removed even if Google's system still lists it. You can undo this.")) return;
   if (action === "dismiss") {
     const note = prompt("Dismiss this review? It won't get a reply from here. Add a note (optional):", "");
     if (note === null) return;
@@ -473,7 +477,7 @@ async function act(id, action, btn) {
     const data = await api(`/api/reviews/${encodeURIComponent(id)}/${action}`, { method: "POST", body });
     renderDetail(data);
     const r = data.review;
-    toast({ approve: r.status === "approved_posted" ? "Reply posted to Google" : "Reply approved", save: "Edits saved", redraft: "New draft written", dismiss: "Review dismissed", reopen: "Moved back to inbox", resolve: "Escalation marked resolved", responded: "Marked as responded" }[action]);
+    toast({ approve: r.status === "approved_posted" ? "Reply posted to Google" : "Reply approved", save: "Edits saved", redraft: "New draft written", dismiss: "Review dismissed", reopen: "Moved back to inbox", resolve: "Escalation marked resolved", responded: "Marked as responded", markremoved: "Marked as removed", unremove: "Removed mark undone" }[action]);
     const i = state.rows.findIndex((x) => x.id === id);
     if (i >= 0) state.rows[i] = r;
     if (state.view === "inbox") state.rows = state.rows.filter((x) => OPEN_STATUSES.includes(x.status));
