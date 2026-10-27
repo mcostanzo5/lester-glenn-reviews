@@ -16,6 +16,7 @@ same review.
 | `src/router.ts` | Rules for what can auto-post, including the keyword list that always goes to a manager |
 | `src/guidelines.ts` | Built-in starter guidelines, plus the safety rules that always apply |
 | `src/staff.ts` | Finds employee names in reviews, matches them to each store's roster, tallies by month |
+| `src/feedback.ts` | Thumbs up/down on drafts: liked examples and lessons for future drafts |
 | `src/backup.ts` | Weekly backup of the database to SharePoint |
 | `src/learn.ts` | Writes new guidelines from your team's real replies (Settings > Reply guidelines) |
 | `src/rooftops.ts` | Store names, sign-offs, contacts, and phone numbers (blank phone = no phone in replies) |
@@ -199,7 +200,7 @@ out. If a token stops working, the dashboard asks them to sign out and back in.
 **One-time setup**
 1. Run the SQL in `migrations/0003_escalations.sql` in the D1 console. Run it
    once only (a second run gives harmless "duplicate column" errors). Then run
-   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql` and `migrations/0010_insights.sql`.
+   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql`, `migrations/0010_insights.sql` and `migrations/0011_feedback.sql`.
 2. IT adds two **delegated** Microsoft Graph permissions to the Lester Glenn
    Reviews app registration, **Mail.Send** and **offline_access**, and clicks
    **Grant admin consent**. Delegated Mail.Send only allows sending as the person
@@ -252,6 +253,16 @@ reach the customer, other) plus an optional note. The agent also records every
 star-rating change. Statistics shows how escalations were resolved, the average
 days to resolve, and **recovered reviews**: escalated reviews whose rating went up
 afterward or that were removed, with a recovery rate per store.
+
+## Thumbs up and down on drafts
+
+Approvers can rate any draft. **Thumbs up** saves it as a good example: future
+drafts for reviews with a similar rating (4-5 stars, 3 stars, or 1-2 stars) use
+up to three liked replies as style examples. **Thumbs down** asks what should
+change, redrafts with that note, and, if the note applies to replies in general,
+adds it as a short lesson to **Settings > Reply guidelines > Lessons from
+feedback**. Every future draft follows those lessons; remove any you don't want.
+Notes about one specific review (a detail to add) are used for that redraft only.
 
 ## Learning from edits
 

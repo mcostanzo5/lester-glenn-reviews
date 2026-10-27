@@ -356,6 +356,7 @@ function renderDetail(data) {
         <button class="btn" data-act="responded">Mark as responded</button>
         <button class="btn quiet danger" data-act="dismiss">Dismiss</button>
       </div>
+      ${r.draft ? thumbsHtml(data.feedback) : ""}
       <p class="meta">This review is on ${esc(outside)}, so the response isn't posted from here. Copy it, post it on ${esc(outside)}${r.source_url ? ` (<a href="${esc(r.source_url)}" target="_blank" rel="noopener">open the review</a>)` : ""}, then click Mark as responded.</p>`}`;
   } else if (answered) {
     replyBlock = `<label class="lbl">Posted reply</label><div class="posted-reply">${esc(r.reply_text || "")}</div>
@@ -376,7 +377,7 @@ function renderDetail(data) {
         <button class="btn" data-act="save">Save edits</button>
         <button class="btn" data-act="redraft">Redraft</button>
         <button class="btn quiet danger" data-act="dismiss">Dismiss</button>
-      </div>` : ""}
+      </div>${r.draft ? thumbsHtml(data.feedback) : ""}` : ""}
       ${!live && canReply ? `<p class="meta">The agent isn't live yet, so approved replies are saved and will post once it goes live.</p>` : ""}`;
   }
 
@@ -418,6 +419,7 @@ function renderDetail(data) {
   $("#detail").querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => act(r.id, b.dataset.act, b)));
   bindStaffBlock(r, data.staff);
   bindNotes(r);
+  bindThumbs(r);
   if ($("#verifyBtn")) $("#verifyBtn").onclick = async (e) => {
     e.target.disabled = true; e.target.textContent = "Checking\u2026";
     try {
@@ -456,6 +458,7 @@ function renderDetail(data) {
 function eventLabel(a) {
   return { drafted: "Drafted", edited: "Edited", approved: "Approved", posted: "Posted", dismissed: "Dismissed", reopened: "Reopened",
     escalated: "Emailed the team", escalation_resolved: "Marked resolved", staff_tagged: "Staff tag",
+    thumbs_up: "\ud83d\udc4d Thumbs up", thumbs_down: "\ud83d\udc4e Thumbs down",
     added: "Added", responded: "Marked responded", note_added: "Added a note", note_removed: "Removed a note",
     removed: "Removed from Google", restored: "Back on Google", reassigned: "Moved", rating_changed: "Rating changed" }[a] || a;
 }
@@ -486,6 +489,16 @@ async function act(id, action, btn) {
     toast({ approve: r.status === "approved_posted" ? "Reply posted to Google" : "Reply approved", save: "Edits saved", redraft: "New draft written", dismiss: "Review dismissed", reopen: "Moved back to inbox", resolve: "Escalation marked resolved", responded: "Marked as responded", markremoved: "Marked as removed", unremove: "Removed mark undone" }[action]);
     const i = state.rows.findIndex((x) => x.id === id);
     if (i >= 0) state.rows[i] = r;
+    const replied = (action === "approve" && r.status === "approved_posted") || (action === "responded" && r.status === "external_done");
+    if (replied && (r.escalation_open || 0) > 0) {
+      const pick = await askOutcome({ title: "Reply posted. Mark the escalation resolved?", cancel: "Not yet" });
+      if (pick) {
+        try {
+          const d2 = await api(`/api/reviews/${encodeURIComponent(id)}/resolve`, { method: "POST", body: pick });
+          renderDetail(d2); if (i >= 0) state.rows[i] = d2.review; toast("Escalation marked resolved");
+        } catch (err) { toast(err.message, true); }
+      }
+    }
     if (state.view === "inbox") state.rows = state.rows.filter((x) => OPEN_STATUSES.includes(x.status));
     if (state.view === "escalations") state.rows = state.rows.filter((x) => (x.escalation_open || 0) > 0);
     renderList(false);
@@ -497,12 +510,58 @@ async function act(id, action, btn) {
   }
 }
 
+/* ---------- Thumbs up / down on drafts ---------- */
+
+function thumbsHtml(feedback) {
+  const last = (feedback || [])[0];
+  return `<div class="thumbs">
+    <span class="meta">How's this draft?</span>
+    <button class="btn thumb" id="thumbUp" title="Good draft: future drafts will use it as an example">\ud83d\udc4d</button>
+    <button class="btn thumb" id="thumbDown" title="Needs work: say what to change and it'll redraft and learn">\ud83d\udc4e</button>
+    ${last ? `<span class="meta">Last: ${last.rating === "up" ? "\ud83d\udc4d" : "\ud83d\udc4e"} by ${esc(last.created_by)}, ${ago(last.created_at)}${last.lesson ? `. Lesson added: \u201c${esc(last.lesson)}\u201d` : ""}</span>` : ""}
+  </div>`;
+}
+
+function askThumbsDown() {
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "outcome-dialog";
+    dlg.innerHTML = `<form method="dialog">
+      <h3>What should change?</h3>
+      <p class="meta">Claude will redraft with this, and if it applies to replies in general, add it as a lesson for every future draft.</p>
+      <textarea name="note" rows="4" required placeholder="For example: too long, and don't apologize twice"></textarea>
+      <div class="actions"><button class="btn primary" value="ok">Redraft</button><button class="btn quiet" value="cancel" formnovalidate>Cancel</button></div>
+    </form>`;
+    document.body.appendChild(dlg);
+    dlg.addEventListener("close", () => {
+      const note = dlg.querySelector("textarea").value.trim();
+      resolve(dlg.returnValue === "ok" && note ? note : null);
+      dlg.remove();
+    });
+    dlg.showModal();
+  });
+}
+
+function bindThumbs(r) {
+  const send = async (rating, note, btn) => {
+    btn.disabled = true;
+    if (rating === "down") btn.textContent = "Redrafting\u2026";
+    try {
+      const d = await api(`/api/reviews/${encodeURIComponent(r.id)}/feedback`, { method: "POST", body: { rating, note } });
+      renderDetail(d);
+      toast(rating === "up" ? "Thanks. Future drafts will use this as an example." : d.lesson ? `Redrafted. Lesson added: \u201c${d.lesson}\u201d` : "Redrafted with your note.");
+    } catch (err) { toast(err.message, true); btn.disabled = false; btn.textContent = rating === "up" ? "\ud83d\udc4d" : "\ud83d\udc4e"; }
+  };
+  if ($("#thumbUp")) $("#thumbUp").onclick = (e) => send("up", "", e.target);
+  if ($("#thumbDown")) $("#thumbDown").onclick = async (e) => { const note = await askThumbsDown(); if (note) send("down", note, e.target); };
+}
+
 /* ---------- Management notes ---------- */
 
 function notesBlock(r, notes, canNote, canReply) {
   if (notes === null || notes === undefined) return "";
   if (!notes.length && !canNote) return "";
-  const list = notes.length ? `<ol class="notes">${notes.map((n) => `<li><div class="note-meta"><span><b>${esc(n.author_name || n.author)}</b>, ${ago(n.created_at)}</span>
+  const list = notes.length ? `<ol class="notes">${notes.map((n) => `<li><div class="note-meta"><span>${n.provided_by ? `From <b>${esc(n.provided_by)}</b>, added by ${esc(n.author_name || n.author)}` : `<b>${esc(n.author_name || n.author)}</b>`}, ${ago(n.created_at)}</span>
       ${n.author === state.me.email || state.me.role === "admin" ? `<button class="btn quiet danger" data-delnote="${n.id}">Remove</button>` : ""}</div>
       <div class="note-body">${esc(n.body)}</div></li>`).join("")}</ol>` : `<p class="meta">No notes yet.</p>`;
   return `<div class="esc-block notes-block"><h3>Management notes</h3>
@@ -510,6 +569,7 @@ function notesBlock(r, notes, canNote, canReply) {
     ${list}
     ${canNote ? `<label class="sr" for="noteText">Add a note</label>
       <textarea id="noteText" rows="4" placeholder="Paste what the manager said, or type background on what happened and what was done."></textarea>
+      <label class="field note-by">Note provided by (first and last name)<input id="noteBy" value="${esc(state.me.name || "")}" placeholder="For example, Jane Smith" autocomplete="off"></label>
       <div class="actions"><button class="btn" id="addNote">Add note</button>
       ${canReply && notes.length ? `<button class="btn primary" id="draftNotes">Draft a reply with these notes</button>` : ""}</div>` : ""}
   </div>`;
@@ -524,7 +584,9 @@ function bindNotes(r) {
   if ($("#addNote")) $("#addNote").onclick = (e) => {
     const body = $("#noteText").value.trim();
     if (!body) return toast("Paste or type the note first.", true);
-    call("note", { body }, "Note added", e.target);
+    const by = $("#noteBy").value.trim();
+    if (!/\S+\s+\S+/.test(by)) return toast("Enter the first and last name of the person who provided this note.", true);
+    call("note", { body, provided_by: by }, "Note added", e.target);
   };
   if ($("#draftNotes")) $("#draftNotes").onclick = (e) => call("draftnotes", {}, "New draft written using the notes. Review it before approving.", e.target);
   $("#detail").querySelectorAll("[data-delnote]").forEach((b) => (b.onclick = () => {
@@ -578,16 +640,16 @@ const OUTCOME_LABELS = { contacted: "Customer contacted", fixed: "Issue resolved
   removed: "Customer removed the review", unreachable: "Couldn't reach the customer", other: "Other" };
 
 /** Asks what happened when an escalation is resolved. Resolves to { outcome, note } or null if cancelled. */
-function askOutcome() {
+function askOutcome(opts = {}) {
   return new Promise((resolve) => {
     const dlg = document.createElement("dialog");
     dlg.className = "outcome-dialog";
     dlg.innerHTML = `<form method="dialog">
-      <h3>What happened?</h3>
+      <h3>${esc(opts.title || "What happened?")}</h3>${opts.title ? `<p class="meta" style="margin-top:-4px">What happened?</p>` : ""}
       <div class="outcome-list">${Object.entries(OUTCOME_LABELS).map(([k, v], i) =>
         `<label><input type="radio" name="outcome" value="${k}" ${i === 0 ? "required" : ""}> ${esc(v)}</label>`).join("")}</div>
       <label class="field">Note (optional)<textarea name="note" rows="3" placeholder="For example: GM called 10/27, offered a free detail"></textarea></label>
-      <div class="actions"><button class="btn primary" value="ok">Mark resolved</button><button class="btn quiet" value="cancel" formnovalidate>Cancel</button></div>
+      <div class="actions"><button class="btn primary" value="ok">Mark resolved</button><button class="btn quiet" value="cancel" formnovalidate>${esc(opts.cancel || "Cancel")}</button></div>
     </form>`;
     document.body.appendChild(dlg);
     dlg.addEventListener("close", () => {
@@ -1354,6 +1416,7 @@ async function renderSettings() {
         <textarea id="pasteText" rows="8" style="width:100%;border:1px solid var(--line);border-radius:6px;padding:10px;font-weight:400"></textarea></label>
       <button class="btn primary" id="learnPaste">Write guidelines from these</button>
     </div>
+    <div id="lessonsBox"></div>
     <label class="field" for="guideText" style="margin-top:12px">Guidelines (edit freely, then save)</label>
     <textarea id="guideText" rows="22" style="width:100%;border:1px solid var(--line);border-radius:6px;padding:10px 12px;line-height:1.5;background:var(--panel)">${esc(guide.text)}</textarea>
     <div class="actions">
@@ -1466,7 +1529,23 @@ function bindTeams(t) {
   };
 }
 
+async function renderLessons() {
+  const box = $("#lessonsBox");
+  if (!box) return;
+  let d;
+  try { d = await api("/api/admin/lessons"); } catch { return; }
+  box.innerHTML = `<div class="lessons"><b>Lessons from feedback</b> <span class="meta">(added automatically from thumbs-down notes; every draft follows these)</span>
+    ${d.lessons.length ? `<ol>${d.lessons.map((l, i) => `<li><span>${esc(l.text)}</span> <span class="meta">${esc(l.by)}, ${ago(l.at)}</span>
+      <button class="btn quiet danger" data-lesson="${i}">Remove</button></li>`).join("")}</ol>` : `<p class="meta">None yet.</p>`}</div>`;
+  box.querySelectorAll("[data-lesson]").forEach((b) => (b.onclick = async () => {
+    if (!confirm("Remove this lesson? Future drafts will stop following it.")) return;
+    try { await api("/api/admin/lessons", { method: "POST", body: { op: "remove", index: +b.dataset.lesson } }); toast("Lesson removed"); renderLessons(); }
+    catch (err) { toast(err.message, true); }
+  }));
+}
+
 function bindGuidelines() {
+  renderLessons();
   const status = $("#guideStatus");
   const learn = async (source, btn) => {
     const old = btn.textContent;

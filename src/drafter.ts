@@ -2,6 +2,7 @@ import type { Env } from "./types";
 import type { DraftResult } from "./router";
 import type { Rooftop } from "./rooftops";
 import { currentGuidelines, SAFETY_RULES } from "./guidelines";
+import { feedbackPrompt } from "./feedback";
 import { Budget, unlimited } from "./budget";
 
 const CONTRACT = `
@@ -53,7 +54,7 @@ export function firstName(display: string | null | undefined): string {
 }
 
 export async function draftReply(env: Env, stars: number, text: string, rooftop: Rooftop, budget: Budget = unlimited(), reviewerName?: string | null,
-  extra: { notes?: string[]; source?: string } = {}): Promise<DraftResult> {
+  extra: { notes?: string[]; source?: string; feedback?: { previous: string; note: string } } = {}): Promise<DraftResult> {
   if (!env.ANTHROPIC_API_KEY) return failed("ANTHROPIC_API_KEY is not set");
   budget.take();
   const payload = {
@@ -61,6 +62,7 @@ export async function draftReply(env: Env, stars: number, text: string, rooftop:
     review: { stars, text: text || "(rating only, no text)", reviewer_first_name: firstName(reviewerName) || null,
       ...(extra.source ? { posted_on: extra.source } : {}) },
     ...(extra.notes?.length ? { management_notes: extra.notes } : {}),
+    ...(extra.feedback ? { rejected_draft: extra.feedback.previous, manager_feedback: extra.feedback.note } : {}),
   };
   let res: Response;
   try {
@@ -70,7 +72,9 @@ export async function draftReply(env: Env, stars: number, text: string, rooftop:
       body: JSON.stringify({
         model: env.CLAUDE_MODEL || "claude-sonnet-5",
         max_tokens: 800,
-        system: (await currentGuidelines(env)).text + "\n\n" + SAFETY_RULES + (extra.notes?.length ? "\n\n" + NOTES_RULES : "") + "\n\n" + CONTRACT,
+        system: (await currentGuidelines(env)).text + (await feedbackPrompt(env, stars)) + "\n\n" + SAFETY_RULES + (extra.notes?.length ? "\n\n" + NOTES_RULES : "")
+          + (extra.feedback ? "\n\n## Redraft\nA manager rejected rejected_draft. Write a new reply that fixes what manager_feedback asks for, while following every rule above." : "")
+          + "\n\n" + CONTRACT,
         messages: [{ role: "user", content: JSON.stringify(payload) }],
       }),
     });

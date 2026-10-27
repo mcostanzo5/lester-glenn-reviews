@@ -7,6 +7,7 @@ import { cleanReply } from "./drafter";
 import { draftAndRoute, HAND_REMOVED, isHandRemoved, logEvent, markRemoved, postReply, recordEdit, rememberOriginal, runAgent } from "./agent";
 import { clearSamples, loadSamples } from "./samples";
 import { backupConfigured, lastBackup, runBackup } from "./backup";
+import { getLessons, lessonFromNote, saveLessons } from "./feedback";
 import { availableReplies, editStats, learnGuidelines, MIN_REPLIES, suggestFromEdits } from "./learn";
 import { clearGuidelinesCache, currentGuidelines } from "./guidelines";
 import { CONCERN_LABEL, FIELDS_FOR, OUTCOMES, TEAMS_FOR, buildEmail, lastEscalation, getTeams, parseEscalation, resolveEscalation, saveTeams, sendEscalation, type Team } from "./escalate";
@@ -176,17 +177,20 @@ async function hasReviewerNames(env: Env): Promise<boolean> {
 }
 
 /** Writes a reply using the review plus any management notes. Returns an error message, or null. */
-async function draftWithNotes(env: Env, r: ReviewRow, user: User, requireNotes: boolean): Promise<string | null> {
+async function draftWithNotes(env: Env, r: ReviewRow, user: User, requireNotes: boolean, feedback?: { previous: string; note: string }): Promise<string | null> {
   let notes: string[] = [];
   try {
-    const rows = (await env.DB.prepare("SELECT body FROM review_notes WHERE review_id = ? ORDER BY id").bind(r.id).all<{ body: string }>()).results;
-    notes = (await Promise.all(rows.map((n) => decryptText(env, n.body)))).filter(Boolean) as string[];
+    const rows = (await env.DB.prepare("SELECT * FROM review_notes WHERE review_id = ? ORDER BY id").bind(r.id).all<any>()).results;
+    notes = (await Promise.all(rows.map(async (n) => {
+      const t = await decryptText(env, n.body);
+      return t ? (n.provided_by ? `From ${n.provided_by} (store team): ${t}` : t) : null;
+    }))).filter(Boolean) as string[];
   } catch { /* notes table not set up */ }
   if (requireNotes && !notes.length) return "Add the management notes first, then draft.";
   const source = (r as any).source as string | null;
-  const d = await draftReply(env, r.stars, r.text, replyRooftop(r as any), undefined, (r as any).reviewer_name, { notes, source: source || undefined });
+  const d = await draftReply(env, r.stars, r.text, replyRooftop(r as any), undefined, (r as any).reviewer_name, { notes, source: source || undefined, feedback });
   if (!d.ok) return `The draft didn't work: ${d.risk_flags[0] || "unknown problem"}. Try again.`;
-  const reason = notes.length ? `Drafted with ${notes.length} management note${notes.length === 1 ? "" : "s"}` : "Redrafted";
+  const reason = feedback ? "Redrafted after a thumbs down" : notes.length ? `Drafted with ${notes.length} management note${notes.length === 1 ? "" : "s"}` : "Redrafted";
   // Replies drafted with notes always wait for an approver; outside reviews stay outside
   const status = source ? "external" : "pending";
   await env.DB.prepare("UPDATE reviews SET draft=?, department=?, sentiment=?, risk_level=?, risk_flags=?, route_reason=?, status=? WHERE id=?")
@@ -309,20 +313,22 @@ async function reviewDetail(env: Env, user: User, id: string) {
   }
   let notes: any[] | null = null;
   try {
-    const rows = (await env.DB.prepare("SELECT id, author, author_name, body, created_at FROM review_notes WHERE review_id = ? ORDER BY id")
+    const rows = (await env.DB.prepare("SELECT * FROM review_notes WHERE review_id = ? ORDER BY id")
       .bind(id).all<any>()).results;
     notes = await Promise.all(rows.map(async (n) => ({ ...n, body: (await decryptText(env, n.body)) ?? "(This note can't be read; it was saved before the app's key changed.)" })));
   } catch { /* migration 0008 not run yet */ }
   const listingKey = matchRooftop(r.location_title || "").key;
   const reassign = r.id.startsWith("accounts/") && ["group", "other"].includes(listingKey) && (user.role === "admin" || user.canReply)
     ? { listing: r.location_title, moved: !!(r as any).rooftop_override } : null;
-  return json({ review: r, reassign, events, escalation, staff, notes, canNote: user.role !== "link" && (canAct(user, r.rooftop_key) || user.canReply) });
+  let feedback: any[] = [];
+  try { feedback = (await env.DB.prepare("SELECT rating, note, lesson, created_by, created_at FROM draft_feedback WHERE review_id = ? ORDER BY id DESC LIMIT 5").bind(id).all()).results; } catch { /* 0011 */ }
+  return json({ review: r, reassign, feedback, events, escalation, staff, notes, canNote: user.role !== "link" && (canAct(user, r.rooftop_key) || user.canReply) });
 }
 
 async function reviewAction(env: Env, user: User, id: string, action: string, body: any, origin: string) {
   const r = await getReview(env, id);
   if (!r || !canSee(user, r.rooftop_key)) return fail("Review not found.", 404);
-  const replyActions = ["save", "approve", "dismiss", "reopen", "redraft", "draftnotes", "responded"];
+  const replyActions = ["save", "approve", "dismiss", "reopen", "redraft", "draftnotes", "responded", "feedback"];
   if (action === "markremoved" || action === "unremove") {
     if (!(user.role === "admin" || user.canReply)) return fail("Only admins and reply approvers can do that.", 403);
     if (action === "markremoved") {
@@ -406,15 +412,51 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
   } else if (action === "redraft" && outside) {
     const err = await draftWithNotes(env, r, user, false);
     if (err) return fail(err, 502);
+  } else if (action === "feedback") {
+    const rating = body?.rating === "down" ? "down" : body?.rating === "up" ? "up" : "";
+    if (!rating) return fail("Pick thumbs up or thumbs down.");
+    if (!r.draft) return fail("There's no draft to rate yet.");
+    const note = String(body?.note || "").replace(/\s*\u2014\s*/g, ", ").trim().slice(0, 1000);
+    if (rating === "down" && !note) return fail("Say what should change, so the redraft and future drafts can fix it.");
+    let lesson: string | null = null;
+    if (rating === "down") {
+      lesson = await lessonFromNote(env, r.stars, r.text, r.draft, note);
+      if (lesson) {
+        const lessons = await getLessons(env, true);
+        if (!lessons.some((l) => l.text.toLowerCase() === lesson!.toLowerCase())) {
+          lessons.push({ text: lesson, by: user.email, at: nowIso(), review_id: id });
+          await saveLessons(env, lessons, user.email);
+        }
+      }
+    }
+    try {
+      await env.DB.prepare("INSERT INTO draft_feedback (review_id, rooftop_key, stars, rating, draft, note, lesson, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?)")
+        .bind(id, r.rooftop_key, r.stars, rating, r.draft, note || null, lesson, user.email, nowIso()).run();
+    } catch { return fail("One-time setup needed: run migrations/0011_feedback.sql in the D1 console.", 503); }
+    await logEvent(env, id, user.email, rating === "up" ? "thumbs_up" : "thumbs_down", rating === "down" ? note : "");
+    if (rating === "down") {
+      const err = await draftWithNotes(env, r, user, false, { previous: r.draft, note });
+      if (err) return fail(err, 502);
+    }
+    const d = await reviewDetail(env, user, id);
+    return json({ ...(await d.json() as any), lesson });
   } else if (action === "draftnotes") {
     const err = await draftWithNotes(env, r, user, true);
     if (err) return fail(err, 502);
   } else if (action === "note") {
     const text = String(body?.body || "").replace(/\s*\u2014\s*/g, ", ").trim().slice(0, 8000);
     if (!text) return fail("Paste or type the note first.");
-    await env.DB.prepare("INSERT INTO review_notes (review_id, author, author_name, body, created_at) VALUES (?,?,?,?,?)")
-      .bind(id, user.email, user.name || null, await encryptText(env, text), nowIso()).run();
-    await logEvent(env, id, user.email, "note_added");
+    const providedBy = String(body?.provided_by || "").replace(/\s+/g, " ").trim().slice(0, 80);
+    if (!/\S+\s+\S+/.test(providedBy)) return fail("Enter the first and last name of the person who provided this note.");
+    const enc = await encryptText(env, text);
+    try {
+      await env.DB.prepare("INSERT INTO review_notes (review_id, author, author_name, body, created_at, provided_by) VALUES (?,?,?,?,?,?)")
+        .bind(id, user.email, user.name || null, enc, nowIso(), providedBy).run();
+    } catch {
+      await env.DB.prepare("INSERT INTO review_notes (review_id, author, author_name, body, created_at) VALUES (?,?,?,?,?)")
+        .bind(id, user.email, user.name || null, enc, nowIso()).run();
+    }
+    await logEvent(env, id, user.email, "note_added", `From ${providedBy}`);
   } else if (action === "delnote") {
     const n = await env.DB.prepare("SELECT author FROM review_notes WHERE id = ? AND review_id = ?").bind(Number(body?.note_id), id).first<{ author: string }>();
     if (!n) return fail("Note not found.", 404);
@@ -581,6 +623,15 @@ async function admin(env: Env, user: User, req: Request, path: string, url: URL,
     if (req.method === "POST") return json(await runBackup(env, `manual:${user.email}`));
     return json({ configured: backupConfigured(env), site: env.BACKUP_SITE || "", folder: env.BACKUP_FOLDER || "Review Dashboard Backups",
       user: env.BACKUP_USER || (env.ADMIN_EMAILS || "").split(",")[0], last: await lastBackup(env) });
+  }
+  if (path === "/api/admin/lessons") {
+    if (req.method === "POST") {
+      const lessons = await getLessons(env, true);
+      const i = Number(body?.index);
+      if (body?.op === "remove" && i >= 0 && i < lessons.length) { lessons.splice(i, 1); await saveLessons(env, lessons, user.email); }
+      return json({ lessons });
+    }
+    return json({ lessons: await getLessons(env, true) });
   }
   if (path === "/api/admin/guidelines/fromedits" && req.method === "POST") {
     const r = await suggestFromEdits(env, (await currentGuidelines(env, true)).text);

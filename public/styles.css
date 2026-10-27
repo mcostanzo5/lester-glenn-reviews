@@ -181,6 +181,17 @@ body.link-mode .detail { position: static; max-width: 760px; margin: 24px auto; 
 .reassign select { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius-s); padding: 5px 8px; font-size: 14px; }
 .reassign .btn { padding: 5px 10px; font-size: 14px; }
 
+/* Thumbs and lessons */
+.thumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.thumb { font-size: 18px; padding: 4px 10px; line-height: 1.2; }
+.thumb:hover { background: var(--paper); }
+.lessons { background: var(--paper); border-radius: var(--radius-s); padding: 10px 12px; margin-top: 10px; font-size: 14px; }
+.lessons ol { margin: 6px 0 0; padding-left: 20px; }
+.lessons li { padding: 3px 0; }
+.lessons .btn { padding: 1px 6px; font-size: 13px; }
+.note-by { margin-top: 8px; }
+.note-by input { border: 1px solid var(--line); border-radius: var(--radius-s); padding: 7px 10px; font: inherit; font-weight: 400; background: var(--panel); color: var(--ink); }
+
 /* Management notes */
 .notes { list-style: none; padding: 0; margin: 6px 0 10px; }
 .notes li { border-left: 3px solid var(--blue); background: var(--paper); border-radius: var(--radius-s); padding: 8px 12px; margin-bottom: 8px; }
