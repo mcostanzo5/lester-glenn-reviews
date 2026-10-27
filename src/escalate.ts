@@ -131,13 +131,13 @@ export function buildEmail(r: ReviewRow, input: EscalationInput, sender: User, o
   </tr></table>
 </td></tr>
 <tr><td style="padding:16px 24px 24px;${F}">
+  ${input.note ? `${heading(`Note from ${esc(sender.name || sender.email)}:`)}
+  <div style="${T}white-space:pre-wrap;margin:0 0 22px">${esc(input.note)}</div>` : ""}
   ${input.unknown ? `${heading("We have been unable to find the customer associated with this review. Here is the information we have:")}
   ${customerRows ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 22px">${customerRows}</table>`
     : `<p style="${T}margin:0 0 22px">Only what's in the review below.</p>`}`
   : customerRows ? `${heading("We believe the customer that left the review is:")}
   <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 22px">${customerRows}</table>` : ""}
-  ${input.note ? `${heading(`Note from ${esc(sender.name || sender.email)}:`)}
-  <div style="${T}white-space:pre-wrap;margin:0 0 22px">${esc(input.note)}</div>` : ""}
   ${heading(`The review${(r as any).source ? ` (posted on ${esc((r as any).source)})` : (r as any).rooftop_override ? ` (posted on the ${esc(r.location_title || "Lester Glenn Auto Group")} Google listing)` : ""}`)}
   ${(r as any).source_url ? `<p style="${F}font-size:14px;line-height:20px;margin:-4px 0 8px"><a href="${esc((r as any).source_url)}" style="color:#0772bc">View it on ${esc((r as any).source)}</a></p>` : ""}
   <div style="${T}background:#f3f5f8;border-left:4px solid #e39b12;padding:12px 16px;margin:0 0 22px;white-space:pre-wrap">${r.text ? esc(r.text) : "<em>Rating only, no written review</em>"}</div>
