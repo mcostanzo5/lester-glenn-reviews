@@ -23,6 +23,9 @@ function isFresh(r: { create_time: string; update_time: string }, days: number):
   return Date.parse(r.update_time) >= cutoff || Date.parse(r.create_time) >= cutoff;
 }
 
+// Counts of reviewer-updated reviews found during this run (reported in the run notes)
+const updatedNotes: number[] = [];
+
 /** Work out each review's status, then write the whole page in one database batch. */
 async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number): Promise<number> {
   if (!reviews.length) return 0;
@@ -44,8 +47,16 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
   const sameText = (a: string | null | undefined, b: string | null | undefined) =>
     (a || "").replace(/\s+/g, " ").trim() === (b || "").replace(/\s+/g, " ").trim();
   const restoredByEdit: string[] = [];
+  const updatedByReviewer: { id: string; prevText: string; prevStars: number }[] = [];
+  let flagged = new Set<string>();
+  try {
+    flagged = new Set((await env.DB.prepare(`SELECT id FROM reviews WHERE reviewer_updated_at IS NOT NULL AND id IN (${ids.map(() => "?").join(",")})`)
+      .bind(...ids).all<{ id: string }>()).results.map((r) => r.id));
+  } catch { /* migration 0012 not run yet */ }
   const writes = reviews.map((g) => {
     const ex = existing.get(g.id);
+    // The reviewer changed what they wrote or their rating (not just a behind-the-scenes Google update)
+    const changedByReviewer = !!ex && ex.status !== "removed" && (!sameText(ex.text, g.text) || (!!ex.stars && !!g.stars && ex.stars !== g.stars));
     let status: Status;
     let replySource: string | null = ex?.reply_source ?? null;
     const handRemoved = !!ex && ex.status === "removed" && isHandRemoved(ex.route_reason);
@@ -61,6 +72,13 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
       restoredByEdit.push(g.id);
       status = isFresh(g, maxAge) ? "new" : "old_unanswered";
       replySource = null;
+    } else if (changedByReviewer) {
+      // Bring it back to the Inbox even though our earlier reply is still on Google
+      updatedByReviewer.push({ id: g.id, prevText: ex!.text, prevStars: ex!.stars });
+      status = "new";
+    } else if (ex && flagged.has(g.id) && ex.update_time === g.update_time && !ANSWERED.includes(ex.status) && ex.status !== "removed") {
+      // Already flagged as updated and waiting on us: keep it in the Inbox until it's answered
+      status = ex.status;
     } else if (g.reply_text) {
       const ours = ex && (ex.status === "auto_posted" || ex.status === "approved_posted");
       status = ours ? ex!.status : "replied_external";
@@ -88,6 +106,14 @@ async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number):
     } catch { /* migration 0010 */ }
     await logEvent(env, g.id, "agent", "rating_changed", `${ex.stars} star${ex.stars === 1 ? "" : "s"} to ${g.stars} star${g.stars === 1 ? "" : "s"}`);
   }
+  for (const u of updatedByReviewer) {
+    try {
+      await env.DB.prepare("UPDATE reviews SET reviewer_updated_at = ?, prev_text = ?, prev_stars = ?, draft = NULL, route_reason = NULL WHERE id = ?")
+        .bind(nowIso(), u.prevText, u.prevStars, u.id).run();
+    } catch { /* migration 0012 not run yet */ }
+    await logEvent(env, u.id, "agent", "review_updated", "The reviewer updated this review");
+  }
+  if (updatedByReviewer.length) updatedNotes.push(updatedByReviewer.length);
   for (const id of restoredByEdit) {
     await env.DB.prepare("UPDATE reviews SET route_reason = NULL WHERE id = ?").bind(id).run();
     await logEvent(env, id, "agent", "restored", "The reviewer changed the review text, so it's back from removed");
@@ -355,7 +381,9 @@ async function verifyStillOnGoogle(env: Env, client: GBPClient, budget: Budget, 
 
 /** Draft one review and save the result. Returns the new status. */
 export async function draftAndRoute(env: Env, r: ReviewRow, actor = "agent", forceReview = false, budget: Budget = unlimited()): Promise<Status> {
-  const d = await draftReply(env, r.stars, r.text, replyRooftop(r as any), budget, (r as any).reviewer_name);
+  const x = r as any;
+  const update = x.reviewer_updated_at ? { prevText: x.prev_text || "", prevStars: x.prev_stars || 0, prevReply: r.reply_text || "" } : undefined;
+  const d = await draftReply(env, r.stars, r.text, replyRooftop(x), budget, x.reviewer_name, { update });
   // A temporary Claude error during a scheduled or manual run: leave it waiting and try again next run
   if (!d.ok && d.retryable && actor === "agent") {
     await env.DB.prepare("UPDATE reviews SET status='new', route_reason=? WHERE id=?")
@@ -403,7 +431,10 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
         } else {
           s.notes.push(`Found ${locs.length} Google ${locs.length === 1 ? "location" : "locations"}.`);
         }
+        updatedNotes.length = 0;
         s.synced += await syncNew(env, client, locs, budget, s.notes);
+        const upd = updatedNotes.reduce((a, n) => a + n, 0);
+        if (upd) s.notes.push(`${upd} review${upd === 1 ? " was" : "s were"} updated by the reviewer and moved back to the Inbox.`);
       } catch (e) {
         if (e instanceof BudgetExhausted) throw e;
         s.errors++; s.notes.push((e as Error).message);
@@ -434,7 +465,7 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
     // 3. Live: post auto-cleared drafts and anything a manager approved
     if (m === "live" && client && budget.has(1)) {
       const toPost = (await env.DB.prepare(
-        `SELECT * FROM reviews WHERE status IN (${autoPost(env) ? "'ready','approved'" : "'approved'"}) AND is_sample=0 AND draft IS NOT NULL AND reply_text IS NULL
+        `SELECT * FROM reviews WHERE status IN (${autoPost(env) ? "'ready','approved'" : "'approved'"}) AND is_sample=0 AND draft IS NOT NULL AND (reply_text IS NULL OR status = 'approved')
          ORDER BY status = 'approved' DESC, create_time ASC LIMIT ?`
       ).bind(Math.min(50, budget.left)).all<ReviewRow>()).results;
       for (const r of toPost) {

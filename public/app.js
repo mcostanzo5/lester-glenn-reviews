@@ -282,6 +282,7 @@ function rowHtml(r) {
   const text = r.text ? esc(r.text) : "Rating only, no written review";
   const escView = state.view === "escalations";
   const hot = (r.escalation_open || 0) > 0 && !ANSWERED.includes(r.status);
+  const updated = !!r.reviewer_updated_at && !ANSWERED.includes(r.status) && r.status !== "removed";
   const resolveBtn = escView && (state.me.role === "admin" || state.me.role === "manager")
     ? `<button class="esc-resolve" data-resolve="${esc(r.id)}" title="The team responded: remove from Escalations">Resolved</button>` : "";
   const quick = (state.me.role === "admin" || state.me.role === "manager")
@@ -289,7 +290,7 @@ function rowHtml(r) {
   const followups = (r.escalation_open || 0) - 1;
   const when = escView
     ? `<span class="when-line">First sent ${ago(r.escalation_first_at)}</span><span class="when-line">${r.escalation_count} ${r.escalation_count === 1 ? "email" : "emails"}, last ${ago(r.escalation_last_at)}</span>${followups > 0 ? `<span class="when-line late">${followups} follow-up${followups === 1 ? "" : "s"}, no response</span>` : ""}`
-    : `${ago(r.create_time)}<br>${hot ? `<span class="pill hot">Escalated</span> ` : ""}${pill(r.status, r.is_sample)}${r.escalation_count ? ` <span class="pill esc" title="Emails sent to the team about this review">\u2709 ${r.escalation_count}</span>` : ""}`;
+    : `${ago(r.create_time)}<br>${hot ? `<span class="pill hot">Escalated</span> ` : ""}${updated ? `<span class="pill updated" title="The reviewer changed this review">Updated</span> ` : ""}${pill(r.status, r.is_sample)}${r.escalation_count ? ` <span class="pill esc" title="Emails sent to the team about this review">\u2709 ${r.escalation_count}</span>` : ""}`;
   return `<div class="row-wrap${quick ? " has-quick" : ""}${resolveBtn ? " has-resolve" : ""}${hot ? " escalated" : ""}"><button class="row" data-id="${esc(r.id)}" aria-current="${state.selected === r.id}">
     <div class="stars-col">${stars(r.stars)}</div>
     <div><div class="store">${esc(shortName(r.rooftop_key))}${r.source ? ` <span class="pill source">${esc(r.source)}</span>` : ""}${r.reviewer_name ? ` <span class="reviewer">${esc(r.reviewer_name)}</span>` : ""}</div><div class="excerpt${r.text ? "" : " empty"}">${text}</div></div>
@@ -368,8 +369,9 @@ function renderDetail(data) {
     replyBlock = `<p class="reason">${r.status === "new" ? "A draft will be written on the next agent run." : "This review is older than the drafting window, so no draft was written."}</p>
       ${canReply ? `<div class="actions"><button class="btn primary" data-act="redraft">Write a draft now</button></div>` : ""}`;
   } else {
-    const approveLabel = live && !r.is_sample ? "Approve and post" : "Approve";
-    replyBlock = `<label class="lbl" for="replyText">Reply</label>
+    const approveLabel = live && !r.is_sample ? (r.reply_text ? "Approve and replace reply" : "Approve and post") : "Approve";
+    const current = r.reply_text && r.reviewer_updated_at ? `<div class="current-reply"><span>Our current reply on Google (approving replaces it)</span>${esc(r.reply_text)}</div>` : "";
+    replyBlock = `${current}<label class="lbl" for="replyText">${r.reply_text && r.reviewer_updated_at ? "New reply" : "Reply"}</label>
       <textarea id="replyText" ${canReply ? "" : "readonly"}>${esc(r.draft || "")}</textarea>
       ${!canReply ? `<p class="meta">Only ${esc(approverNames())} can approve or change replies.</p>` : ""}
       ${canReply ? `<div class="actions">
@@ -405,6 +407,9 @@ function renderDetail(data) {
       ? ` <button class="btn quiet" id="verifyBtn" title="Ask Google whether this review still exists">Check on Google</button>
           ${r.status === "removed" ? `<button class="btn quiet" data-act="unremove">Undo removed</button>`
             : `<button class="btn quiet" data-act="markremoved" title="Use when the review is gone from the Google profile but Google hasn't caught up">Mark as removed</button>`}` : ""}</div>`}
+    ${r.reviewer_updated_at && r.status !== "removed" ? `<div class="updated-box"><b>Updated by the reviewer ${whenLabel(r.reviewer_updated_at)}.</b>
+      ${r.prev_stars ? ` Was ${stars(r.prev_stars)}, now ${stars(r.stars)}.` : ""}
+      ${r.prev_text !== null && r.prev_text !== undefined ? `<details><summary>What it said before</summary><p>${r.prev_text ? esc(r.prev_text) : "<em>Rating only</em>"}</p></details>` : ""}</div>` : ""}
     <blockquote>${r.text ? esc(r.text) : "<em>Rating only, no written review</em>"}</blockquote>
     ${reason}
     ${replyBlock}
@@ -460,7 +465,7 @@ function eventLabel(a) {
     escalated: "Emailed the team", escalation_resolved: "Marked resolved", staff_tagged: "Staff tag",
     thumbs_up: "\ud83d\udc4d Thumbs up", thumbs_down: "\ud83d\udc4e Thumbs down",
     added: "Added", responded: "Marked responded", note_added: "Added a note", note_removed: "Removed a note",
-    removed: "Removed from Google", restored: "Back on Google", reassigned: "Moved", rating_changed: "Rating changed" }[a] || a;
+    removed: "Removed from Google", restored: "Back on Google", review_updated: "Updated by the reviewer", reassigned: "Moved", rating_changed: "Rating changed" }[a] || a;
 }
 
 async function act(id, action, btn) {

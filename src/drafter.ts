@@ -54,7 +54,7 @@ export function firstName(display: string | null | undefined): string {
 }
 
 export async function draftReply(env: Env, stars: number, text: string, rooftop: Rooftop, budget: Budget = unlimited(), reviewerName?: string | null,
-  extra: { notes?: string[]; source?: string; feedback?: { previous: string; note: string } } = {}): Promise<DraftResult> {
+  extra: { notes?: string[]; source?: string; feedback?: { previous: string; note: string }; update?: { prevText: string; prevStars: number; prevReply: string } } = {}): Promise<DraftResult> {
   if (!env.ANTHROPIC_API_KEY) return failed("ANTHROPIC_API_KEY is not set");
   budget.take();
   const payload = {
@@ -63,6 +63,7 @@ export async function draftReply(env: Env, stars: number, text: string, rooftop:
       ...(extra.source ? { posted_on: extra.source } : {}) },
     ...(extra.notes?.length ? { management_notes: extra.notes } : {}),
     ...(extra.feedback ? { rejected_draft: extra.feedback.previous, manager_feedback: extra.feedback.note } : {}),
+    ...(extra.update ? { review_before_update: { stars: extra.update.prevStars, text: extra.update.prevText || "(rating only)" }, our_current_reply: extra.update.prevReply || null } : {}),
   };
   let res: Response;
   try {
@@ -74,6 +75,7 @@ export async function draftReply(env: Env, stars: number, text: string, rooftop:
         max_tokens: 800,
         system: (await currentGuidelines(env)).text + (await feedbackPrompt(env, stars)) + "\n\n" + SAFETY_RULES + (extra.notes?.length ? "\n\n" + NOTES_RULES : "")
           + (extra.feedback ? "\n\n## Redraft\nA manager rejected rejected_draft. Write a new reply that fixes what manager_feedback asks for, while following every rule above." : "")
+          + (extra.update ? "\n\n## Updated review\nThe reviewer changed their review (review_before_update shows what it said before). If our_current_reply is given, your reply will replace it on Google. Respond to the review as it reads now; if it got worse, acknowledge that their experience changed and invite them to reach out. Don't mention that the review was edited or quote the old version." : "")
           + "\n\n" + CONTRACT,
         messages: [{ role: "user", content: JSON.stringify(payload) }],
       }),

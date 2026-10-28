@@ -200,7 +200,7 @@ out. If a token stops working, the dashboard asks them to sign out and back in.
 **One-time setup**
 1. Run the SQL in `migrations/0003_escalations.sql` in the D1 console. Run it
    once only (a second run gives harmless "duplicate column" errors). Then run
-   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql`, `migrations/0010_insights.sql` and `migrations/0011_feedback.sql`.
+   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql`, `migrations/0010_insights.sql`, `migrations/0011_feedback.sql` and `migrations/0012_updated_reviews.sql`.
 2. IT adds two **delegated** Microsoft Graph permissions to the Lester Glenn
    Reviews app registration, **Mail.Send** and **offline_access**, and clicks
    **Grant admin consent**. Delegated Mail.Send only allows sending as the person
@@ -288,6 +288,16 @@ Setup:
    `lesterglenn.sharepoint.com/sites/Marketing`) and deploy. Don't set it before
    step 1, or sign-in will ask for a permission that hasn't been approved.
 3. `BACKUP_USER` signs out and back in once. The folder is created on the first backup.
+
+## Reviews the reviewer updates
+
+When a reviewer changes their review text or star rating, even on a review that
+already has a reply, it goes back to the Inbox right after escalations with an
+orange **Updated** tag, and the run notes say how many. The review shows the old
+and new rating, what it said before, and the reply currently on Google. Claude
+drafts a reply to the review as it reads now; **Approve and replace reply**
+replaces the old reply on Google. Behind-the-scenes Google updates with no real
+change are ignored.
 
 ## Removed reviews
 

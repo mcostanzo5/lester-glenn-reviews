@@ -151,7 +151,7 @@ async function listReviews(env: Env, user: User, url: URL) {
   }
   const page = Math.max(0, parseInt(url.searchParams.get("page") || "0", 10) || 0);
   // Inbox order: open escalations, flagged, failed posts, waiting for a draft, drafts ready, approved, older unanswered
-  const order = view === "inbox" ? `CASE WHEN ${await hasEscalationCols(env) ? "escalation_open > 0" : "0"} THEN 0 ELSE 1 END,
+  const order = view === "inbox" ? `CASE WHEN ${await hasEscalationCols(env) ? "escalation_open > 0" : "0"} THEN 0 WHEN ${await hasUpdateCols(env) ? "reviewer_updated_at IS NOT NULL" : "0"} THEN 1 ELSE 2 END,
       CASE status WHEN 'pending' THEN 0 WHEN 'error' THEN 1 WHEN 'new' THEN 2 WHEN 'ready' THEN 3 WHEN 'approved' THEN 4 ELSE 5 END, create_time DESC`
     : view === "escalations" ? "escalation_first_at ASC" // longest-waiting first
     : "create_time DESC";
@@ -166,6 +166,13 @@ async function hasEscalationCols(env: Env): Promise<boolean> {
   if (escalationColsReady) return true;
   try { await env.DB.prepare("SELECT escalation_open FROM reviews LIMIT 1").first(); escalationColsReady = true; } catch { /* not yet */ }
   return escalationColsReady;
+}
+
+let updateColsReady = false;
+async function hasUpdateCols(env: Env): Promise<boolean> {
+  if (updateColsReady) return true;
+  try { await env.DB.prepare("SELECT reviewer_updated_at FROM reviews LIMIT 1").first(); updateColsReady = true; } catch { /* not yet */ }
+  return updateColsReady;
 }
 
 let reviewerNamesReady = false;
@@ -188,7 +195,8 @@ async function draftWithNotes(env: Env, r: ReviewRow, user: User, requireNotes: 
   } catch { /* notes table not set up */ }
   if (requireNotes && !notes.length) return "Add the management notes first, then draft.";
   const source = (r as any).source as string | null;
-  const d = await draftReply(env, r.stars, r.text, replyRooftop(r as any), undefined, (r as any).reviewer_name, { notes, source: source || undefined, feedback });
+  const d = await draftReply(env, r.stars, r.text, replyRooftop(r as any), undefined, (r as any).reviewer_name, { notes, source: source || undefined, feedback,
+    update: (r as any).reviewer_updated_at ? { prevText: (r as any).prev_text || "", prevStars: (r as any).prev_stars || 0, prevReply: r.reply_text || "" } : undefined });
   if (!d.ok) return `The draft didn't work: ${d.risk_flags[0] || "unknown problem"}. Try again.`;
   const reason = feedback ? "Redrafted after a thumbs down" : notes.length ? `Drafted with ${notes.length} management note${notes.length === 1 ? "" : "s"}` : "Redrafted";
   // Replies drafted with notes always wait for an approver; outside reviews stay outside

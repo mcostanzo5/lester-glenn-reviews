@@ -181,6 +181,16 @@ body.link-mode .detail { position: static; max-width: 760px; margin: 24px auto; 
 .reassign select { border: 1px solid var(--line); background: var(--panel); border-radius: var(--radius-s); padding: 5px 8px; font-size: 14px; }
 .reassign .btn { padding: 5px 10px; font-size: 14px; }
 
+/* Reviews the reviewer updated */
+.pill.updated { background: #f59e0b; color: #1f2933; }
+.updated-box { background: #fff4e0; border-left: 4px solid #f59e0b; border-radius: var(--radius-s); padding: 8px 12px; margin: 8px 0; font-size: 14px; color: #1f2933; }
+.updated-box .stars { font-size: 14px; }
+.updated-box details { margin-top: 4px; }
+.updated-box summary { cursor: pointer; color: var(--blue-deep); }
+.updated-box p { white-space: pre-wrap; margin: 6px 0 0; }
+.current-reply { background: var(--paper); border-radius: var(--radius-s); padding: 8px 12px; margin-bottom: 10px; white-space: pre-wrap; font-size: 14px; }
+.current-reply span { display: block; font-weight: 600; color: var(--muted); margin-bottom: 2px; }
+
 /* Thumbs and lessons */
 .thumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .thumb { font-size: 18px; padding: 4px 10px; line-height: 1.2; }
