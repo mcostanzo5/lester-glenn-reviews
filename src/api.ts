@@ -8,6 +8,7 @@ import { draftAndRoute, HAND_REMOVED, isHandRemoved, logEvent, markRemoved, post
 import { clearSamples, loadSamples } from "./samples";
 import { backupConfigured, lastBackup, runBackup } from "./backup";
 import { getLessons, lessonFromNote, saveLessons } from "./feedback";
+import { CarsError, EXTERNAL_STORES, externalConfigured, findDealers, getIds, isApiSource, saveIds, testConnection } from "./cars";
 import { availableReplies, editStats, learnGuidelines, MIN_REPLIES, suggestFromEdits } from "./learn";
 import { clearGuidelinesCache, currentGuidelines } from "./guidelines";
 import { CONCERN_LABEL, FIELDS_FOR, OUTCOMES, TEAMS_FOR, buildEmail, lastEscalation, getTeams, parseEscalation, resolveEscalation, saveTeams, sendEscalation, type Team } from "./escalate";
@@ -19,6 +20,10 @@ import { allowedDomains, canSendAs, decryptText, encryptText, checkAddresses, ma
 
 const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external','external_done')";
 const OPEN_SQL = "('new','pending','ready','approved','error','old_unanswered','external')";
+// For response rate: a review counts as answered if a reply of ours is showing on the site, even when the
+// reviewer has since updated it and it's back in the Inbox for a fresh reply.
+const HAS_REPLY = `(status IN ${ANSWERED_SQL} OR (status IN ${OPEN_SQL} AND reply_text IS NOT NULL))`;
+const NO_REPLY = `(status IN ${OPEN_SQL} AND reply_text IS NULL)`;
 
 export const OUTSIDE_SOURCES = ["DealerRater", "Yelp", "Facebook", "Cars.com", "CarGurus", "BBB", "Edmunds", "Autotrader"];
 
@@ -120,9 +125,13 @@ async function listReviews(env: Env, user: User, url: URL) {
   const args = [...s.args];
   const status = url.searchParams.get("status");
   if (view === "inbox") { const inbox = await inboxWhere(env); where.push(inbox.sql); args.push(...inbox.args); }
-  else if (view === "escalations") where.push("escalation_open > 0");
+  else if (view === "escalations") {
+    where.push("escalation_open > 0");
+    if (url.searchParams.get("stale")) { where.push("escalation_last_at <= ?"); args.push(staleCutoff(env)); }
+  }
   else if (status === "open") where.push(`status IN ${OPEN_SQL}`);
   else if (status === "answered") where.push(`status IN ${ANSWERED_SQL}`);
+  else if (status === "noreply") where.push(NO_REPLY);
   else if (status) { where.push("status = ?"); args.push(status); }
   const days = parseInt(url.searchParams.get("days") || "", 10);
   if (days > 0) { where.push("create_time >= ?"); args.push(new Date(Date.now() - days * 86400_000).toISOString()); }
@@ -363,7 +372,8 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
   if (action === "note" || action === "delnote") {
     if (user.role === "link" || !(canAct(user, r.rooftop_key) || user.canReply)) return fail("You can't add notes to this review.", 403);
   } else if (!replyActions.includes(action) && !canAct(user, r.rooftop_key)) return fail("You have view-only access to this store.", 403);
-  const outside = !!(r as any).source;
+  // Reviews from other sites we can't post to (pasted in by hand). DealerRater and Cars.com post through their API.
+  const outside = !!(r as any).source && !isApiSource(r.id);
   const reply = typeof body?.reply === "string" ? cleanReply(body.reply) : "";
 
   if (action === "save") {
@@ -386,6 +396,7 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
     if (mode(env) === "live" && !r.is_sample) {
       try { await postReply(env, new GBPClient(env), r, reply, user.email, "manager"); }
       catch (e) {
+        if (e instanceof CarsError) return fail(`${(r as any).source} didn't accept the reply: ${e.message}`, 502);
         if (e instanceof GBPError && e.status === 404) {
           await markRemoved(env, id, user.email);
           return fail("This review is no longer on Google (the reviewer deleted it or Google took it down), so there's nothing to reply to. It's been marked as removed.", 410);
@@ -505,10 +516,10 @@ async function stats(env: Env, user: User, url: URL) {
   const metrics = `
     COUNT(*) AS total,
     ROUND(AVG(NULLIF(stars,0)), 2) AS avg_stars,
-    SUM(status IN ${ANSWERED_SQL}) AS answered,
-    ROUND(AVG(CASE WHEN status IN ${ANSWERED_SQL} AND reply_time IS NOT NULL THEN ${hours} END), 1) AS avg_hours,
-    SUM(status IN ${ANSWERED_SQL} AND reply_time IS NOT NULL AND ${hours} <= 24) AS within_24,
-    SUM(status IN ${OPEN_SQL}) AS open,
+    SUM(${HAS_REPLY}) AS answered,
+    ROUND(AVG(CASE WHEN ${HAS_REPLY} AND reply_time IS NOT NULL THEN ${hours} END), 1) AS avg_hours,
+    SUM(${HAS_REPLY} AND reply_time IS NOT NULL AND ${hours} <= 24) AS within_24,
+    SUM(${NO_REPLY}) AS open,
     SUM(reply_source = 'agent') AS by_agent,
     SUM(reply_source = 'manager') AS by_manager,
     SUM(reply_source = 'google') AS by_google,
@@ -516,7 +527,7 @@ async function stats(env: Env, user: User, url: URL) {
   const q = (sql: string) => env.DB.prepare(sql).bind(...args);
   const [overall, byRooftop, monthly, starsDist] = await env.DB.batch([
     q(`SELECT ${metrics} FROM reviews WHERE ${where}`),
-    q(`SELECT rooftop_key, ${metrics}, MIN(CASE WHEN status IN ${OPEN_SQL} THEN create_time END) AS oldest_open
+    q(`SELECT rooftop_key, ${metrics}, MIN(CASE WHEN ${NO_REPLY} THEN create_time END) AS oldest_open
        FROM reviews WHERE ${where} GROUP BY rooftop_key`),
     q(`SELECT strftime('%Y-%m', create_time) AS month, ${metrics} FROM reviews WHERE ${where} GROUP BY month ORDER BY month`),
     q(`SELECT stars, COUNT(*) AS n FROM reviews WHERE ${where} GROUP BY stars`),
@@ -530,6 +541,22 @@ async function stats(env: Env, user: User, url: URL) {
     stars: starsDist.results,
     escalations: await escalationStats(env, user, url.searchParams.get("rooftop"), from, to, names),
   });
+}
+
+const staleDays = (env: Env) => Math.max(1, parseInt(env.STALE_ESCALATION_DAYS || "7", 10) || 7);
+const staleCutoff = (env: Env) => new Date(Date.now() - staleDays(env) * 86400_000).toISOString();
+
+/** Open escalations with no email (first or follow-up) in STALE_ESCALATION_DAYS, for the daily reminder. */
+async function staleEscalations(env: Env, user: User): Promise<Response> {
+  const days = staleDays(env);
+  if (user.role !== "admin" && user.role !== "manager") return json({ days, reviews: [] });
+  if (!(await hasEscalationCols(env))) return json({ days, reviews: [] });
+  const s = scope(user, env, null);
+  const rows = (await env.DB.prepare(`SELECT id, rooftop_key, stars, reviewer_name, substr(text, 1, 160) AS text, source,
+      escalation_last_at, escalation_count FROM reviews
+    WHERE ${s.sql} AND escalation_open > 0 AND status != 'removed' AND escalation_last_at <= ?
+    ORDER BY escalation_last_at ASC LIMIT 50`).bind(...s.args, staleCutoff(env)).all()).results;
+  return json({ days, reviews: rows });
 }
 
 /** Themes and key phrases across reviews for a range of calendar months (Topics tab). */
@@ -632,6 +659,32 @@ async function admin(env: Env, user: User, req: Request, path: string, url: URL,
     return json({ configured: backupConfigured(env), site: env.BACKUP_SITE || "", folder: env.BACKUP_FOLDER || "Review Dashboard Backups",
       user: env.BACKUP_USER || (env.ADMIN_EMAILS || "").split(",")[0], last: await lastBackup(env) });
   }
+  if (path === "/api/admin/external") {
+    if (req.method === "POST") {
+      try {
+        if (body?.op === "save") {
+          const ids: Record<string, { dr?: string; cars?: string }> = {};
+          for (const s of EXTERNAL_STORES()) {
+            const v = body.ids?.[s.key] || {};
+            const dr = String(v.dr || "").trim(), cars = String(v.cars || "").trim();
+            if ((dr && !/^\d+$/.test(dr)) || (cars && !/^[\w-]+$/.test(cars))) return fail(`Check the IDs for ${s.name}: DealerRater IDs are numbers.`);
+            if (dr || cars) ids[s.key] = { ...(dr ? { dr } : {}), ...(cars ? { cars } : {}) };
+          }
+          await saveIds(env, ids, user.email);
+          return json({ saved: true });
+        }
+        if (body?.op === "find") return json({ dealers: await findDealers(env, String(body.name || "Lester Glenn")) });
+        if (body?.op === "test") return json(await testConnection(env));
+      } catch (e) { return fail((e as Error).message, 502); }
+      return fail("Unknown request.");
+    }
+    return json({
+      configured: { key: externalConfigured(env), client: !!(env.CARS_CLIENT_ID && env.CARS_CLIENT_SECRET) },
+      server: env.CARS_API_BASE || "https://services.dealerrater.com",
+      stores: EXTERNAL_STORES().map((s) => ({ key: s.key, name: s.name })),
+      ids: await getIds(env),
+    });
+  }
   if (path === "/api/admin/lessons") {
     if (req.method === "POST") {
       const lessons = await getLessons(env, true);
@@ -715,6 +768,7 @@ export async function handleApi(req: Request, env: Env, user: User): Promise<Res
   if (path.startsWith("/api/admin/")) return admin(env, user, req, path, url, body);
   if (path.startsWith("/api/staff")) return staffApi(env, user, req, path, url, body);
   if (path.startsWith("/api/topics")) return topicsApi(env, user, path, url);
+  if (path === "/api/escalations/stale") return staleEscalations(env, user);
   const m = path.match(/^\/api\/reviews\/([^/]+)(?:\/([a-z]+))?$/);
   if (m) {
     const id = decodeURIComponent(m[1]);

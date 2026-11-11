@@ -101,6 +101,7 @@ async function boot() {
   renderRunStatus();
   const mb = $("#manualEscBtn");
   if (mb && (m.role === "admin" || m.role === "manager")) { mb.hidden = false; mb.onclick = openManualEscalation; }
+  if (m.role === "admin" || m.role === "manager") setTimeout(checkStaleEscalations, 800);
   const banner = $("#banner");
   if (m.mode === "dry_run") { banner.hidden = false; banner.textContent = "Dry run: showing sample reviews. Nothing is read from or posted to Google."; }
   if (m.mode === "shadow") { banner.hidden = false; banner.textContent = "Shadow mode: these are real reviews, but no replies are posted to Google yet."; }
@@ -108,7 +109,7 @@ async function boot() {
 
   $("#tabs").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-view]");
-    if (b) { state.filters.source = ""; setView(b.dataset.view); }
+    if (b) { state.filters.source = ""; state.staleOnly = false; setView(b.dataset.view); }
   });
   $("#storeSelect").addEventListener("change", (e) => setRooftop(e.target.value));
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.selected) closeDetail(); });
@@ -194,6 +195,7 @@ async function loadList(append = false) {
   const q = new URLSearchParams({ view: state.view, page: String(state.page) });
   if (state.rooftop) q.set("rooftop", state.rooftop);
   if (state.view === "all") for (const [k, v] of Object.entries(state.filters)) if (v && !(k === "days" && v === "custom")) q.set(k, v);
+  if (state.view === "escalations" && state.staleOnly) q.set("stale", "1");
   const v = $("#view");
   if (!append) v.innerHTML = filtersHtml() + `<div class="empty-state">Loading reviews\u2026</div>`;
   bindFilters();
@@ -208,13 +210,16 @@ async function loadList(append = false) {
 }
 
 function filtersHtml() {
+  if (state.view === "escalations" && state.staleOnly) {
+    return `<div class="stale-banner">Showing escalations with no follow-up in ${state.staleDays || 7}+ days. <button class="link-btn" id="showAllEsc">Show all escalations</button></div>`;
+  }
   if (state.view !== "all") return "";
   const f = state.filters;
   const opt = (val, label, cur) => `<option value="${val}" ${cur === val ? "selected" : ""}>${label}</option>`;
   return `<form class="filters" id="filters" role="search" onsubmit="return false">
     <label class="sr" for="fStatus">Status</label>
     <select id="fStatus">${opt("", "Any status", f.status)}${opt("open", "Not answered", f.status)}${opt("answered", "Answered", f.status)}
-      ${opt("pending", "Needs review", f.status)}${opt("dismissed", "Dismissed", f.status)}${opt("removed", "Removed from Google", f.status)}${opt("old_unanswered", "Not answered, over 14 days old", f.status)}</select>
+      ${opt("pending", "Needs review", f.status)}${opt("noreply", "No reply on the site yet", f.status)}${opt("dismissed", "Dismissed", f.status)}${opt("removed", "Removed from Google", f.status)}${opt("old_unanswered", "Not answered, over 14 days old", f.status)}</select>
     <label class="sr" for="fDays">Time range</label>
     <select id="fDays">${opt("", "Any time", f.days)}${opt("7", "Last 7 days", f.days)}${opt("30", "Last 30 days", f.days)}${opt("90", "Last 90 days", f.days)}${opt("365", "Last 12 months", f.days)}${opt("custom", "Custom range\u2026", f.days)}</select>
     <label class="sr" for="fStars">Rating</label>
@@ -249,10 +254,17 @@ function bindFilters() {
   $("#fQ").oninput = () => { clearTimeout(t); t = setTimeout(apply, 350); };
 }
 
+function bindStaleBanner() {
+  if ($("#showAllEsc")) $("#showAllEsc").onclick = () => { state.staleOnly = false; setView("escalations"); };
+}
+
 function renderList(more) {
   const v = $("#view");
+  setTimeout(bindStaleBanner, 0);
   if (!state.rows.length) {
-    const msg = state.view === "escalations"
+    const msg = state.view === "escalations" && state.staleOnly
+      ? `<strong>Nothing overdue</strong>Every open escalation has had an email in the last ${state.staleDays || 7} days.`
+      : state.view === "escalations"
       ? `<strong>No open escalations</strong>Reviews that have been emailed to a store team show up here until someone marks them resolved.`
       : state.view === "inbox"
       ? `<strong>Inbox is clear</strong>Every review has a reply. New reviews show up here until they're answered.${state.me.mode === "dry_run" && state.me.role === "admin" ? " Load sample data from Settings to try it out." : ""}`
@@ -338,7 +350,9 @@ function renderDetail(data) {
   let flags = [];
   try { flags = JSON.parse(r.risk_flags || "[]"); } catch { /* ignore */ }
 
-  const outside = r.source || "";
+  // Pasted-in reviews from sites we can't post to; DealerRater and Cars.com post through their API
+  const viaApi = /^(dr|cars)\//.test(r.id);
+  const outside = r.source && !viaApi ? r.source : "";
   let replyBlock = "";
   if (r.status === "removed") {
     replyBlock = `<p class="reason removed-note"><b>${/^Marked removed by hand/.test(r.route_reason || "") ? esc(r.route_reason) + "." : "No longer on Google."}</b>
@@ -369,8 +383,9 @@ function renderDetail(data) {
     replyBlock = `<p class="reason">${r.status === "new" ? "A draft will be written on the next agent run." : "This review is older than the drafting window, so no draft was written."}</p>
       ${canReply ? `<div class="actions"><button class="btn primary" data-act="redraft">Write a draft now</button></div>` : ""}`;
   } else {
-    const approveLabel = live && !r.is_sample ? (r.reply_text ? "Approve and replace reply" : "Approve and post") : "Approve";
-    const current = r.reply_text && r.reviewer_updated_at ? `<div class="current-reply"><span>Our current reply on Google (approving replaces it)</span>${esc(r.reply_text)}</div>` : "";
+    const onSite = viaApi ? ` on ${r.source}` : "";
+    const approveLabel = live && !r.is_sample ? (r.reply_text ? `Approve and replace reply${onSite}` : `Approve and post${viaApi ? " to " + r.source : ""}`) : "Approve";
+    const current = r.reply_text && r.reviewer_updated_at ? `<div class="current-reply"><span>Our current reply on ${esc(r.source || "Google")} (approving replaces it)</span>${esc(r.reply_text)}</div>` : "";
     replyBlock = `${current}<label class="lbl" for="replyText">${r.reply_text && r.reviewer_updated_at ? "New reply" : "Reply"}</label>
       <textarea id="replyText" ${canReply ? "" : "readonly"}>${esc(r.draft || "")}</textarea>
       ${!canReply ? `<p class="meta">Only ${esc(approverNames())} can approve or change replies.</p>` : ""}
@@ -390,7 +405,7 @@ function renderDetail(data) {
   $("#detail").innerHTML = `
     <div class="detail-head">
       <div><h2>${esc(storeName(r.rooftop_key))}</h2><p class="meta">${r.reviewer_name ? `<b class="reviewer-name">${esc(r.reviewer_name)}</b>, ` : ""}${outside ? new Date(r.create_time).toLocaleDateString(undefined, { timeZone: "America/New_York", dateStyle: "medium" }) : new Date(r.create_time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</p>
-        ${outside ? `<p class="meta"><span class="pill source">${esc(outside)}</span>${r.source_url ? ` <a href="${esc(r.source_url)}" target="_blank" rel="noopener">View on ${esc(outside)}</a>` : ""}</p>` : ""}</div>
+        ${r.source ? `<p class="meta"><span class="pill source">${esc(r.source)}</span>${r.source_url ? ` <a href="${esc(r.source_url)}" target="_blank" rel="noopener">View on ${esc(r.source)}</a>` : ""}</p>` : ""}</div>
       <div class="head-actions">
         ${canAct && escalation && escalation.ready && escalation.teams ? `<button class="btn escalate" id="escalateBtn">${r.escalation_open ? "Follow up" : "Escalate"}</button>` : ""}
         ${linkOnly ? "" : `<button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button>`}
@@ -513,6 +528,43 @@ async function act(id, action, btn) {
     buttons.forEach((b) => (b.disabled = false));
     btn.textContent = old;
   }
+}
+
+/* ---------- Daily reminder: escalations with no follow-up in a week ---------- */
+
+async function checkStaleEscalations(force = false) {
+  const key = `stale-reminder:${state.me.email}`;
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  try { if (!force && localStorage.getItem(key) === today) return; } catch { /* storage off: show it */ }
+  let d;
+  try { d = await api("/api/escalations/stale"); } catch { return; }
+  state.staleDays = d.days;
+  if (!d.reviews.length) return;
+  try { localStorage.setItem(key, today); } catch { /* */ }
+  const daysSince = (t) => Math.max(d.days, Math.floor((Date.now() - Date.parse(t)) / 86400_000));
+  const summary = (r) => `<div class="stale-review"><div><b>${esc(storeName(r.rooftop_key))}</b>${r.source ? ` <span class="pill source">${esc(r.source)}</span>` : ""}
+      ${stars(r.stars)}${r.reviewer_name ? ` <span class="meta">${esc(r.reviewer_name)}</span>` : ""}</div>
+      ${r.text ? `<div class="stale-text">${esc(r.text)}${r.text.length >= 160 ? "\u2026" : ""}</div>` : ""}</div>`;
+  const one = d.reviews.length === 1 ? d.reviews[0] : null;
+  const dlg = document.createElement("dialog");
+  dlg.className = "outcome-dialog stale-dialog";
+  dlg.innerHTML = one
+    ? `<h3>It's been ${daysSince(one.escalation_last_at)} days since you last followed up on this review. Follow up now?</h3>
+       ${summary(one)}
+       <div class="actions"><button class="btn primary" data-open="${esc(one.id)}">Follow up now</button><button class="btn quiet" data-close>Later</button></div>`
+    : `<h3>${d.reviews.length} escalations haven't had a follow-up in ${d.days}+ days</h3>
+       <ol class="stale-list">${d.reviews.slice(0, 8).map((r) => `<li>${summary(r)}
+         <div class="stale-row"><span class="late">It's been ${daysSince(r.escalation_last_at)} days since the last follow-up.</span>
+         <button class="btn" data-open="${esc(r.id)}">Follow up</button></div></li>`).join("")}</ol>
+       ${d.reviews.length > 8 ? `<p class="meta">And ${d.reviews.length - 8} more.</p>` : ""}
+       <div class="actions"><button class="btn primary" data-all>Take me to escalations needing my attention</button><button class="btn quiet" data-close>Later</button></div>`;
+  document.body.appendChild(dlg);
+  const close = () => { dlg.close(); dlg.remove(); };
+  dlg.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => { close(); openDetail(b.dataset.open, true); }));
+  if (dlg.querySelector("[data-all]")) dlg.querySelector("[data-all]").onclick = () => { close(); state.staleOnly = true; setView("escalations"); };
+  dlg.querySelector("[data-close]").onclick = close;
+  dlg.addEventListener("cancel", () => dlg.remove());
+  dlg.showModal();
 }
 
 /* ---------- Thumbs up / down on drafts ---------- */
@@ -1302,8 +1354,8 @@ async function renderStats() {
     // Open All reviews filtered to the same unanswered reviews this number counts
     if (b.dataset.openUnanswered) state.rooftop = b.dataset.openUnanswered;
     state.filters = state.statsDays === -1
-      ? { status: "open", stars: "", q: "", days: "custom", start: state.statsStart, end: state.statsEnd, source: "google" }
-      : { status: "open", stars: "", q: "", days: state.statsDays ? String(state.statsDays) : "", start: "", end: "", source: "google" };
+      ? { status: "noreply", stars: "", q: "", days: "custom", start: state.statsStart, end: state.statsEnd, source: "google" }
+      : { status: "noreply", stars: "", q: "", days: state.statsDays ? String(state.statsDays) : "", start: "", end: "", source: "google" };
     renderRail();
     setView("all");
   }));
@@ -1362,8 +1414,8 @@ async function renderSettings() {
   const v = $("#view");
   v.innerHTML = `<div class="empty-state">Loading settings\u2026</div>`;
   let users, runs;
-  let guide, teams, backup;
-  try { [users, runs, guide, teams, backup] = await Promise.all([api("/api/admin/users"), api("/api/admin/runs"), api("/api/admin/guidelines"), api("/api/admin/teams"), api("/api/admin/backup")]); }
+  let guide, teams, backup, ext;
+  try { [users, runs, guide, teams, backup, ext] = await Promise.all([api("/api/admin/users"), api("/api/admin/runs"), api("/api/admin/guidelines"), api("/api/admin/teams"), api("/api/admin/backup"), api("/api/admin/external")]); }
   catch (e) { v.innerHTML = `<div class="empty-state"><strong>Settings didn't load</strong>${esc(e.message)}</div>`; return; }
   const m = state.me.mode;
   const modeText = {
@@ -1405,6 +1457,7 @@ async function renderSettings() {
       <p class="note" style="margin-top:12px">They sign in with their Lester Glenn Microsoft account.</p></div>
   </div>
   ${teamsPanel(teams, users.rooftops)}
+  ${externalPanel(ext)}
   ${backupPanel(backup)}
   <div class="panel" id="guidePanel"><h3>Reply guidelines</h3>
     <p class="note">${guide.custom ? `Custom guidelines saved by ${esc(guide.updatedBy || "an admin")}${guide.updatedAt ? ", " + ago(guide.updatedAt) : ""}.` : "Using the built-in starter guidelines."}
@@ -1438,6 +1491,7 @@ async function renderSettings() {
 
   if (!guide.needsSetup) bindGuidelines();
   if (teams.ready) bindTeams(teams);
+  bindExternal(ext);
   if ($("#backupNow")) $("#backupNow").onclick = async (e) => {
     e.target.disabled = true; e.target.textContent = "Backing up\u2026";
     try { const r = await api("/api/admin/backup", { method: "POST" }); toast(r.message, !r.ok); renderSettings(); }
@@ -1476,6 +1530,58 @@ async function renderSettings() {
       await api(`/api/admin/users?email=${encodeURIComponent(b.dataset.remove)}`, { method: "DELETE" });
       toast("Access removed"); renderSettings();
     } catch (err) { toast(err.message, true); }
+  };
+}
+
+function externalPanel(x) {
+  const ready = x.configured.key;
+  const rows = x.stores.map((st) => `<tr><td>${esc(st.name)}</td>
+    <td><input class="ext-id" data-store="${esc(st.key)}" data-kind="dr" value="${esc(x.ids[st.key]?.dr || "")}" inputmode="numeric" placeholder="e.g. 12345"></td>
+    <td><input class="ext-id" data-store="${esc(st.key)}" data-kind="cars" value="${esc(x.ids[st.key]?.cars || "")}" placeholder="Cars.com dealer ID"></td></tr>`).join("");
+  return `<div class="panel" id="extPanel"><h3>DealerRater and Cars.com</h3>
+    <p class="note">New reviews are pulled in every run, and approved replies post straight to the site.
+      Server: <code>${esc(x.server)}</code>.
+      API key: <b>${ready ? "set" : "not set"}</b>. Client ID and secret (for posting): <b>${x.configured.client ? "set" : "not set"}</b>.
+      ${ready ? "" : "Add <code>CARS_API_KEY</code>, <code>CARS_CLIENT_ID</code> and <code>CARS_CLIENT_SECRET</code> as Cloudflare secrets."}</p>
+    <div class="table-wrap"><table class="ext-table"><thead><tr><th>Store</th><th>DealerRater ID</th><th>Cars.com ID</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="actions">
+      <button class="btn primary" id="extSave">Save IDs</button>
+      <button class="btn" id="extFind" ${ready ? "" : "disabled"}>Find our DealerRater IDs</button>
+      <button class="btn" id="extTest" ${ready ? "" : "disabled"}>Test connection</button>
+    </div>
+    <div id="extOut"></div></div>`;
+}
+
+function bindExternal(x) {
+  if (!$("#extPanel")) return;
+  const out = $("#extOut");
+  $("#extSave").onclick = async (e) => {
+    const ids = {};
+    $("#extPanel").querySelectorAll(".ext-id").forEach((i) => { const v = i.value.trim(); if (v) (ids[i.dataset.store] ||= {})[i.dataset.kind] = v; });
+    e.target.disabled = true;
+    try { await api("/api/admin/external", { method: "POST", body: { op: "save", ids } }); toast("Saved. They'll be checked on the next run."); }
+    catch (err) { toast(err.message, true); }
+    e.target.disabled = false;
+  };
+  if ($("#extFind")) $("#extFind").onclick = async (e) => {
+    e.target.disabled = true; out.innerHTML = `<p class="meta">Searching DealerRater\u2026</p>`;
+    try {
+      const r = await api("/api/admin/external", { method: "POST", body: { op: "find", name: "Lester Glenn" } });
+      out.innerHTML = r.dealers.length ? `<p class="meta">Click an ID to copy it, then paste it next to the right store.</p>
+        <div class="table-wrap"><table><thead><tr><th>ID</th><th>Name on DealerRater</th><th>Address</th><th>Phone</th></tr></thead><tbody>
+        ${r.dealers.map((d) => `<tr><td><button class="link-btn" data-copy="${esc(String(d.id))}">${esc(String(d.id))}</button></td><td>${esc(d.name || "")}</td>
+          <td>${esc([d.address, d.city, d.state].filter(Boolean).join(", "))}</td><td>${esc(d.phone || "")}</td></tr>`).join("")}</tbody></table></div>`
+        : `<p class="meta">No DealerRater dealers found with "Lester Glenn" in the name.</p>`;
+      out.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.copy); toast(`Copied ${b.dataset.copy}`); } catch { toast(b.dataset.copy); } }));
+    } catch (err) { out.innerHTML = `<p class="late">${esc(err.message)}</p>`; }
+    e.target.disabled = false;
+  };
+  if ($("#extTest")) $("#extTest").onclick = async (e) => {
+    e.target.disabled = true; out.innerHTML = `<p class="meta">Testing\u2026</p>`;
+    try { const r = await api("/api/admin/external", { method: "POST", body: { op: "test" } });
+      out.innerHTML = `<ul class="${r.ok ? "test-ok" : "test-bad"}">${r.lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`; }
+    catch (err) { out.innerHTML = `<p class="late">${esc(err.message)}</p>`; }
+    e.target.disabled = false;
   };
 }
 

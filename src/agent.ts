@@ -2,6 +2,7 @@ import type { Env, ReviewRow, Status } from "./types";
 import { ANSWERED, autoPost, mode, num, nowIso } from "./types";
 import { GBPClient, GBPError, type GReview } from "./gbp";
 import { matchRooftop, replyRooftop, rooftopByKey, rooftopFor } from "./rooftops";
+import { externalConfigured, isApiSource, postExternal, syncExternal } from "./cars";
 import { draftReply } from "./drafter";
 import { route } from "./router";
 import { Budget, BudgetExhausted, unlimited } from "./budget";
@@ -194,7 +195,9 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
         if (!top && page.reviews[0]) top = page.reviews[0].update_time;
         const fresh = loc.newest_seen ? page.reviews.filter((r) => r.update_time > loc.newest_seen!) : page.reviews;
         const hist = withinHistory(fresh, cutoff);
-        count += await savePage(env, hist.keep, loc, maxAge);
+        // A review written before the history cutoff but edited recently is still news: keep it
+        const recentEdits = loc.newest_seen ? fresh.filter((r) => r.create_time < cutoff && r.update_time >= cutoff) : [];
+        count += await savePage(env, [...hist.keep, ...recentEdits], loc, maxAge);
         // Anything we have from the stretch this page covers that Google no longer lists was deleted
         if (p === 0 && !firstRun) {
           const oldest = page.next && page.reviews.length ? page.reviews[page.reviews.length - 1].update_time : null;
@@ -383,7 +386,7 @@ async function verifyStillOnGoogle(env: Env, client: GBPClient, budget: Budget, 
 export async function draftAndRoute(env: Env, r: ReviewRow, actor = "agent", forceReview = false, budget: Budget = unlimited()): Promise<Status> {
   const x = r as any;
   const update = x.reviewer_updated_at ? { prevText: x.prev_text || "", prevStars: x.prev_stars || 0, prevReply: r.reply_text || "" } : undefined;
-  const d = await draftReply(env, r.stars, r.text, replyRooftop(x), budget, x.reviewer_name, { update });
+  const d = await draftReply(env, r.stars, r.text, replyRooftop(x), budget, x.reviewer_name, { update, source: x.source || undefined });
   // A temporary Claude error during a scheduled or manual run: leave it waiting and try again next run
   if (!d.ok && d.retryable && actor === "agent") {
     await env.DB.prepare("UPDATE reviews SET status='new', route_reason=? WHERE id=?")
@@ -400,12 +403,16 @@ export async function draftAndRoute(env: Env, r: ReviewRow, actor = "agent", for
   return status;
 }
 
-export async function postReply(env: Env, client: GBPClient, r: ReviewRow, text: string, actor: string, source: "agent" | "manager") {
-  await client.postReply(r.id, text);
+export async function postReply(env: Env, client: GBPClient | null, r: ReviewRow, text: string, actor: string, source: "agent" | "manager") {
+  if (isApiSource(r.id)) await postExternal(env, r as any, text);
+  else {
+    if (!client) throw new Error("Google isn't connected for this run.");
+    await client.postReply(r.id, text);
+  }
   const status: Status = source === "agent" ? "auto_posted" : "approved_posted";
   await env.DB.prepare(`UPDATE reviews SET status=?, reply_text=?, reply_time=?, reply_source=? WHERE id=?`)
     .bind(status, text, nowIso(), source, r.id).run();
-  await logEvent(env, r.id, actor, "posted", source === "agent" ? "Auto-posted" : "Posted after approval");
+  await logEvent(env, r.id, actor, "posted", (source === "agent" ? "Auto-posted" : "Posted after approval") + ((r as any).source ? ` to ${(r as any).source}` : ""));
 }
 
 async function inBatches<T>(items: T[], size: number, fn: (t: T) => Promise<void>) {
@@ -433,6 +440,10 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
         }
         updatedNotes.length = 0;
         s.synced += await syncNew(env, client, locs, budget, s.notes);
+        if (externalConfigured(env)) {
+          try { s.synced += await syncExternal(env, budget, s.notes); }
+          catch (e) { if (e instanceof BudgetExhausted) throw e; s.notes.push(`DealerRater/Cars.com: ${(e as Error).message}`); }
+        }
         const upd = updatedNotes.reduce((a, n) => a + n, 0);
         if (upd) s.notes.push(`${upd} review${upd === 1 ? " was" : "s were"} updated by the reviewer and moved back to the Inbox.`);
       } catch (e) {
