@@ -548,6 +548,13 @@ async function stats(env: Env, user: User, url: URL) {
     monthly: monthly.results,
     stars: starsDist.results,
     escalations: await escalationStats(env, user, url.searchParams.get("rooftop"), from, to, names),
+    bySite: await (async () => {
+      const siteWhere = where.replace("source IS NULL AND ", "");
+      if (siteWhere === where) return null; // source column missing
+      return (await env.DB.prepare(`SELECT COALESCE(source, 'Google') AS site, COUNT(*) AS total, ROUND(AVG(NULLIF(stars, 0)), 2) AS avg_stars,
+          SUM(stars >= 4) AS positive, SUM(stars = 3) AS neutral, SUM(stars BETWEEN 1 AND 2) AS negative
+        FROM reviews WHERE ${siteWhere} GROUP BY site ORDER BY total DESC`).bind(...args).all()).results;
+    })(),
   });
 }
 
@@ -811,7 +818,12 @@ async function staffApi(env: Env, user: User, req: Request, path: string, url: U
           COUNT(DISTINCT CASE WHEN m.stars >= 4 THEN m.review_id END) AS positive,
           COUNT(DISTINCT CASE WHEN m.stars = 3 THEN m.review_id END) AS neutral,
           COUNT(DISTINCT CASE WHEN m.stars BETWEEN 1 AND 2 THEN m.review_id END) AS negative,
-          ROUND(AVG(NULLIF(m.stars, 0)), 2) AS avg_stars
+          ROUND(AVG(NULLIF(m.stars, 0)), 2) AS avg_stars,
+          COUNT(DISTINCT CASE WHEN r.source IS NULL THEN m.review_id END) AS on_google,
+          COUNT(DISTINCT CASE WHEN r.source = 'DealerRater' THEN m.review_id END) AS on_dealerrater,
+          COUNT(DISTINCT CASE WHEN r.source = 'Cars.com' THEN m.review_id END) AS on_cars,
+          COUNT(DISTINCT CASE WHEN r.source IS NOT NULL AND r.source NOT IN ('DealerRater', 'Cars.com') THEN m.review_id END) AS on_other,
+          COUNT(DISTINCT CASE WHEN m.tagged_by = 'site' THEN m.review_id END) AS site_tagged
         ${base.replace("FROM mentions m", "FROM mentions m JOIN staff s ON s.id = m.staff_id")} AND m.match IN ('auto','manual')${roleSql}
         GROUP BY s.id ORDER BY reviews DESC, s.full_name`).bind(...args, ...(roleSql ? [role] : [])),
       env.DB.prepare(`SELECT m.rooftop_key, MIN(m.name_raw) AS name, m.match, COUNT(DISTINCT m.review_id) AS reviews

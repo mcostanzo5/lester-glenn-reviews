@@ -155,7 +155,9 @@ export async function scanReviews(env: Env, budget: Budget, opts: { from?: strin
   if (opts.from) { where.push("create_time >= ?"); args.push(opts.from); }
   if (opts.to) { where.push("create_time < ?"); args.push(opts.to); }
   if (opts.rooftops && opts.rooftops !== "*") { where.push(`rooftop_key IN (${opts.rooftops.map(() => "?").join(",") || "''"})`); args.push(...opts.rooftops); }
-  const sql = `SELECT id, rooftop_key, create_time, stars, text FROM reviews WHERE ${where.join(" AND ")}`;
+  let siteTags = false;
+  try { await env.DB.prepare("SELECT site_tags FROM reviews LIMIT 1").first(); siteTags = true; } catch { /* migration 0014 */ }
+  const sql = `SELECT id, rooftop_key, create_time, stars, text${siteTags ? ", site_tags" : ""} FROM reviews WHERE ${where.join(" AND ")}`;
   let scanned = 0, found = 0;
   const rosters = new Map<string, Staff[]>();
 
@@ -172,7 +174,20 @@ export async function scanReviews(env: Env, budget: Budget, opts: { from?: strin
     for (const r of rows) {
       const i = withText.indexOf(r);
       const got = i >= 0 ? results.get(i) : undefined;
-      const mentions = got?.mentions || [];
+      // DealerRater / Cars.com employee tags come first; Claude's reading of the text adds anyone else
+      let tags: { name: string; role: string; sentiment: string }[] = [];
+      try { tags = (r as any).site_tags ? JSON.parse((r as any).site_tags) : []; } catch { tags = []; }
+      const sameAsTag = (name: string) => {
+        const n = norm(name).split(" ");
+        return tags.some((t) => {
+          const tn = norm(t.name).split(" ");
+          return tn[0] === n[0] && (n.length === 1 || tn[tn.length - 1] === n[n.length - 1] || (n[n.length - 1].length <= 2 && tn[tn.length - 1].startsWith(n[n.length - 1])));
+        });
+      };
+      const mentions = [
+        ...tags.map((t) => ({ name: t.name, role: t.role, sentiment: t.sentiment, site: true })),
+        ...(got?.mentions || []).filter((m) => !sameAsTag(m.name)).map((m) => ({ ...m, site: false })),
+      ];
       if (!rosters.has(r.rooftop_key)) rosters.set(r.rooftop_key, await rosterFor(env, r.rooftop_key));
       const kept = (await env.DB.prepare("SELECT name_raw FROM mentions WHERE review_id = ? AND match IN ('manual','ignored')").bind(r.id).all<{ name_raw: string }>())
         .results.map((m) => norm(m.name_raw));
@@ -180,8 +195,8 @@ export async function scanReviews(env: Env, budget: Budget, opts: { from?: strin
       for (const m of mentions) {
         if (kept.includes(norm(m.name))) continue;
         const d = decide(m.name, m.role, rosters.get(r.rooftop_key)!);
-        writes.push(env.DB.prepare(`INSERT INTO mentions (review_id, rooftop_key, review_time, stars, name_raw, role_hint, sentiment, staff_id, match)
-          VALUES (?,?,?,?,?,?,?,?,?)`).bind(r.id, r.rooftop_key, r.create_time, r.stars, m.name, m.role, m.sentiment, d.staff_id, d.match));
+        writes.push(env.DB.prepare(`INSERT INTO mentions (review_id, rooftop_key, review_time, stars, name_raw, role_hint, sentiment, staff_id, match, tagged_by)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(r.id, r.rooftop_key, r.create_time, r.stars, m.name, m.role, m.sentiment, d.staff_id, d.match, m.site ? "site" : null));
         found++;
       }
       writes.push(env.DB.prepare("UPDATE reviews SET mentions_scanned_at = ? WHERE id = ?").bind(nowIso(), r.id));

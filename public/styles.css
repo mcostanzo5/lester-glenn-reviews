@@ -276,6 +276,13 @@ tr.clickable:hover td { background: var(--paper); }
 .roster-add .btn { justify-self: start; }
 .roster-add textarea { border: 1px solid var(--line); border-radius: var(--radius-s); padding: 8px 10px; font-weight: 400; width: 100%; background: var(--panel); }
 
+/* Per-site columns and totals */
+.site-col { color: var(--muted); }
+th.site-col { border-left: 1px solid var(--line); }
+.total-row td { border-top: 2px solid var(--line); }
+.share-bar { display: inline-block; vertical-align: middle; width: 140px; height: 10px; border-radius: 5px; background: var(--paper); overflow: hidden; }
+.share-bar span { display: block; height: 100%; background: var(--blue); border-radius: 5px; }
+
 /* Daily reminder for overdue escalations */
 .stale-dialog { max-width: 560px; }
 .stale-dialog h3 { line-height: 1.3; }

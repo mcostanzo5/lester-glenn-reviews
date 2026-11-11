@@ -75,13 +75,29 @@ async function tokenFor(env: Env, kind: Kind, dealer: string): Promise<string> {
   return d.access_token;
 }
 
-interface ExtReview { id: string; stars: number; text: string; create_time: string; reviewer: string; response: { id: string; body: string; at: string } | null; employees: string[] }
+export interface SiteTag { name: string; role: "sales" | "service" | "other"; sentiment: "positive" | "negative" | "neutral" }
+interface ExtReview { id: string; stars: number; text: string; create_time: string; reviewer: string; response: { id: string; body: string; at: string } | null; employees: string[]; tags: SiteTag[] }
+
+function roleFromPosition(p: string): SiteTag["role"] {
+  if (/service|advisor|technician|tech\b|parts|porter|cashier|shuttle|detail/i.test(p)) return "service";
+  if (/sales|consultant|product|specialist|internet|bdc|finance|f\s*&\s*i|business manager|leasing/i.test(p)) return "sales";
+  return "other";
+}
 
 function normalize(kind: Kind, dealer: string, r: any, staff: Map<number, any>): ExtReview {
   const ratings = r.Ratings || {};
   const stars = Math.max(0, Math.min(5, Math.round(Number(ratings.Overall ?? ratings.Average ?? 0))));
-  const employees = (r.EmployeeTags || []).map((t: any) => staff.get(t.Id)).filter(Boolean)
-    .map((e: any) => `${e.FirstName || ""} ${e.LastName || ""}`.trim() + (e.Position ? ` (${e.Position})` : ""));
+  const tagged = (r.EmployeeTags || []).map((t: any) => ({ t, e: staff.get(t.Id) })).filter((x: any) => x.e);
+  const employees = tagged.map(({ e }: any) => `${e.FirstName || ""} ${e.LastName || ""}`.trim() + (e.Position ? ` (${e.Position})` : ""));
+  // The customer picked these people themselves, so they become staff mentions directly
+  const tags: SiteTag[] = tagged.map(({ t, e }: any) => {
+    const rating = Number(t.Rating) || stars;
+    return {
+      name: `${e.FirstName || ""} ${e.LastName || ""}`.replace(/\s+/g, " ").trim(),
+      role: roleFromPosition(String(e.Position || "")),
+      sentiment: rating >= 4 ? "positive" : rating && rating <= 2 ? "negative" : "neutral",
+    } as SiteTag;
+  }).filter((x: SiteTag) => x.name);
   const others = String(r.OtherEmployees || "").trim();
   const parts = [r.Title ? String(r.Title).trim() : "", String(r.Body || "").trim()].filter(Boolean);
   if (employees.length || others) parts.push(`Employees worked with: ${[...employees, ...(others ? [others] : [])].join(", ")}`);
@@ -90,7 +106,7 @@ function normalize(kind: Kind, dealer: string, r: any, staff: Map<number, any>):
     id: `${kind}/${dealer}/${r.Id}`, stars, text: parts.join("\n\n"),
     create_time: new Date(r.Date || Date.now()).toISOString(), reviewer: String(r.UserName || "").trim(),
     response: resp ? { id: String(resp.Id), body: String(resp.Body || ""), at: new Date(resp.DateUpdated || resp.DateEntered || Date.now()).toISOString() } : null,
-    employees,
+    employees, tags,
   };
 }
 
@@ -124,10 +140,16 @@ async function upsert(env: Env, rooftop: string, kind: Kind, dealer: string, ite
           source, reviewer_name, reply_text, reply_time, reply_source, ext_response_id) VALUES (?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?,?)`)
         .bind(g.id, `${kind}:${dealer}`, rooftop, name, g.stars, g.text, g.create_time, g.create_time, status, nowIso(), LABEL[kind], g.reviewer || null,
           g.response?.body || null, g.response?.at || null, g.response ? "site" : null, g.response?.id || null).run();
+      try { await env.DB.prepare("UPDATE reviews SET site_tags = ? WHERE id = ?").bind(JSON.stringify(g.tags), g.id).run(); } catch { /* migration 0014 */ }
       added++;
       continue;
     }
     if (ex.status === "removed") continue;
+    try {
+      // Tags added or changed on the site: store them and have the review read for staff again
+      await env.DB.prepare("UPDATE reviews SET site_tags = ?, mentions_scanned_at = NULL WHERE id = ? AND (site_tags IS NULL OR site_tags != ?)")
+        .bind(JSON.stringify(g.tags), g.id, JSON.stringify(g.tags)).run();
+    } catch { /* migration 0014 */ }
     if (!same(ex.text, g.text) || (ex.stars && g.stars && ex.stars !== g.stars)) {
       // The reviewer changed their review: back to the Inbox, like Google reviews
       await env.DB.prepare(`UPDATE reviews SET text=?, stars=?, prev_text=?, prev_stars=?, reviewer_updated_at=?, update_time=?, status='new', draft=NULL, route_reason=NULL,

@@ -1012,12 +1012,14 @@ async function renderStaff() {
       <td><b>${esc(p.full_name)}</b>${p.active ? "" : ` <span class="meta">(inactive)</span>`}</td>
       <td>${esc(storeName(p.rooftop_key).replace(/^Lester Glenn /, ""))}</td><td>${ROLE_LABEL[p.role]}</td>
       <td class="num"><b>${p.reviews}</b></td><td class="num">${p.positive}</td><td class="num">${p.neutral}</td><td class="num ${p.negative ? "late" : ""}">${p.negative}</td>
-      <td class="num">${p.avg_stars ?? "\u2013"}</td></tr>`).join("");
+      <td class="num">${p.avg_stars ?? "\u2013"}</td>
+      <td class="num site-col">${p.on_google || 0}</td><td class="num site-col">${p.on_dealerrater || 0}</td><td class="num site-col">${p.on_cars || 0}</td><td class="num site-col">${p.on_other || 0}</td></tr>`).join("");
   const tally = `<div class="panel"><div class="panel-head"><h3>Reviews per person, ${esc(label)}</h3>
       ${t.people.length ? `<button class="btn" id="csvBtn">Download CSV</button>` : ""}</div>
-    <p class="note">Each review counts once per person it names. Click a name to see the reviews.</p>
+    <p class="note">Each review counts once per person it names or tags. <b>Reviews</b> is the total across every site, then split by site. DealerRater and Cars.com employee tags count automatically. Click a name to see the reviews.</p>
     ${t.people.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Store</th><th>Role</th><th class="num">Reviews</th>
-      <th class="num">4\u20135 \u2605</th><th class="num">3 \u2605</th><th class="num">1\u20132 \u2605</th><th class="num">Avg</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      <th class="num">4\u20135 \u2605</th><th class="num">3 \u2605</th><th class="num">1\u20132 \u2605</th><th class="num">Avg</th>
+      <th class="num site-col">Google</th><th class="num site-col">DealerRater</th><th class="num site-col">Cars.com</th><th class="num site-col">Other</th></tr></thead><tbody>${rows}</tbody></table></div>`
       : `<p class="meta">Nobody tallied yet for this range.${roster.staff.length ? "" : " Add each store's staff below so names can be matched."}</p>`}
     <div id="drill"></div></div>`;
 
@@ -1055,8 +1057,9 @@ async function scanMonths(f, btn) {
 
 function downloadCsv(people, label) {
   const cell = (x) => `"${String(x ?? "").replace(/"/g, '""')}"`;
-  const lines = [["Name", "Store", "Role", "Reviews", "4-5 stars", "3 stars", "1-2 stars", "Average stars"].map(cell).join(",")]
-    .concat(people.map((p) => [p.full_name, storeName(p.rooftop_key), ROLE_LABEL[p.role], p.reviews, p.positive, p.neutral, p.negative, p.avg_stars].map(cell).join(",")));
+  const lines = [["Name", "Store", "Role", "Total reviews", "4-5 stars", "3 stars", "1-2 stars", "Average stars", "Google", "DealerRater", "Cars.com", "Other sites", "Tagged on DealerRater or Cars.com"].map(cell).join(",")]
+    .concat(people.map((p) => [p.full_name, storeName(p.rooftop_key), ROLE_LABEL[p.role], p.reviews, p.positive, p.neutral, p.negative, p.avg_stars,
+      p.on_google || 0, p.on_dealerrater || 0, p.on_cars || 0, p.on_other || 0, p.site_tagged || 0].map(cell).join(",")));
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([lines.join("\r\n")], { type: "text/csv" }));
   a.download = `staff-reviews-${label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.csv`;
@@ -1349,7 +1352,7 @@ async function renderStats() {
         <span>Approved in dashboard</span><div class="bar"><span style="width:${pct(o.by_manager, replied)}%;background:var(--green)"></span></div><span>${o.by_manager || 0}</span>
         <span>Directly in Google</span><div class="bar"><span style="width:${pct(o.by_google, replied)}%;background:var(--muted)"></span></div><span>${o.by_google || 0}</span>
       </div></div>
-    </div></div>${escalationStatsHtml(s.escalations)}`;
+    </div></div>${bySiteHtml(s.bySite)}${escalationStatsHtml(s.escalations)}`;
   bindRange();
   v.querySelectorAll("[data-open-review]").forEach((b) => (b.onclick = () => openDetail(b.dataset.openReview)));
   v.querySelectorAll("[data-open-unanswered]").forEach((b) => (b.onclick = () => {
@@ -1361,6 +1364,21 @@ async function renderStats() {
     renderRail();
     setView("all");
   }));
+}
+
+function bySiteHtml(rows) {
+  if (!rows || !rows.length) return "";
+  const total = rows.reduce((a, r) => a + r.total, 0);
+  const max = Math.max(...rows.map((r) => r.total), 1);
+  return `<div class="panel"><h3>Reviews by site</h3>
+    <p class="note">Every review in this range for the selected store, by where it was posted. The numbers above cover Google only.</p>
+    <div class="table-wrap"><table><thead><tr><th>Site</th><th class="num">Reviews</th><th>Share</th><th class="num">Rating</th>
+      <th class="num">4\u20135 \u2605</th><th class="num">3 \u2605</th><th class="num">1\u20132 \u2605</th></tr></thead><tbody>
+    ${rows.map((r) => `<tr><td><b>${esc(r.site)}</b></td><td class="num">${r.total}</td>
+      <td><span class="share-bar"><span style="width:${Math.round((r.total / max) * 100)}%"></span></span> <span class="meta">${Math.round((r.total / total) * 100)}%</span></td>
+      <td class="num">${r.avg_stars ?? "\u2013"}</td><td class="num">${r.positive || 0}</td><td class="num">${r.neutral || 0}</td><td class="num ${r.negative ? "late" : ""}">${r.negative || 0}</td></tr>`).join("")}
+    <tr class="total-row"><td><b>All sites</b></td><td class="num"><b>${total}</b></td><td></td><td></td><td></td><td></td><td></td></tr>
+    </tbody></table></div></div>`;
 }
 
 function escalationStatsHtml(e) {

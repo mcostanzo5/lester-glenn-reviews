@@ -201,7 +201,7 @@ out. If a token stops working, the dashboard asks them to sign out and back in.
 **One-time setup**
 1. Run the SQL in `migrations/0003_escalations.sql` in the D1 console. Run it
    once only (a second run gives harmless "duplicate column" errors). Then run
-   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql`, `migrations/0010_insights.sql`, `migrations/0011_feedback.sql`, `migrations/0012_updated_reviews.sql` and `migrations/0013_external_reviews.sql`.
+   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql`, `migrations/0010_insights.sql`, `migrations/0011_feedback.sql`, `migrations/0012_updated_reviews.sql`, `migrations/0013_external_reviews.sql` and `migrations/0014_site_tags.sql`.
 2. IT adds two **delegated** Microsoft Graph permissions to the Lester Glenn
    Reviews app registration, **Mail.Send** and **offline_access**, and clicks
    **Grant admin consent**. Delegated Mail.Send only allows sending as the person
@@ -260,7 +260,7 @@ overdue ones.
 
 Marking an escalation resolved asks what happened (customer contacted, issue
 resolved, customer updated the review, customer removed the review, couldn't
-reach the customer, other) plus an optional note. The agent also records every
+reach the customer, unknown customer reached out requesting additional info, other) plus an optional note. The agent also records every
 star-rating change. Statistics shows how escalations were resolved, the average
 days to resolve, and **recovered reviews**: escalated reviews whose rating went up
 afterward or that were removed, with a recovery rate per store.
@@ -346,9 +346,13 @@ sticks through future syncs, and it can be moved back.
 Reviews come in through the Cars Commerce Reputation API and work like Google
 reviews: drafts, Inbox, approvals, escalations, notes, thumbs, staff, topics, and
 edit detection. Approving posts the reply straight to DealerRater or Cars.com
-(or replaces our existing response there). DealerRater's tagged employees are
-added to the review text as "Employees worked with:", so they count on the Staff
-tab. The Cars.com feed is filtered to Cars.com reviews, so DealerRater reviews it
+(or replaces our existing response there). DealerRater and Cars.com employee tags
+become staff mentions directly, matched to the store's roster by full name (the
+position helps tell apart two people with the same first name, and the customer's
+rating of that employee sets positive or negative). Claude still reads the text for
+anyone mentioned but not tagged, without double-counting. The Staff tab shows each
+person's total plus Google, DealerRater, Cars.com and other-site counts, and
+Statistics has a Reviews by site panel. The Cars.com feed is filtered to Cars.com reviews, so DealerRater reviews it
 syndicates aren't duplicated.
 
 Setup:
