@@ -695,7 +695,8 @@ function openManualEscalation() {
 /* ---------- Escalations ---------- */
 
 const OUTCOME_LABELS = { contacted: "Customer contacted", fixed: "Issue resolved", updated: "Customer updated the review",
-  removed: "Customer removed the review", unreachable: "Couldn't reach the customer", other: "Other" };
+  removed: "Customer removed the review", unreachable: "Couldn't reach the customer",
+  unknown_info: "Unknown customer, reached out requesting additional info", other: "Other" };
 
 /** Asks what happened when an escalation is resolved. Resolves to { outcome, note } or null if cancelled. */
 function askOutcome(opts = {}) {
