@@ -200,17 +200,22 @@ export async function testConnection(env: Env): Promise<{ ok: boolean; lines: st
   const lines: string[] = [];
   let ok = true;
   lines.push(`Server: ${base(env)}`);
-  try { await call(env, "GET", "/dealer_v1/dealers/?Name=Lester%20Glenn&ItemsPerPage=1"); lines.push("API key: works."); }
-  catch (e) { ok = false; lines.push(`API key: ${(e as Error).message}`); return { ok, lines }; }
+  try { await call(env, "GET", "/dealer_v1/dealers/?Name=Lester%20Glenn&ItemsPerPage=1"); lines.push("Dealer search (Find our DealerRater IDs): works."); }
+  catch (e) {
+    ok = false;
+    const st = (e as CarsError).status;
+    lines.push(`Dealer search (Find our DealerRater IDs): ${(e as Error).message}` +
+      (st === 403 ? " The key was rejected for this request: it may be for the other server (production vs staging), not enabled yet, or saved with a typo." : ""));
+  }
   const map = await getIds(env);
   const first = Object.entries(map).find(([, v]) => v.dr || v.cars);
-  if (!first) { lines.push("Store IDs: none entered yet, so posting can't be tested."); return { ok, lines }; }
+  if (!first) { lines.push("Store IDs: none entered yet. Enter one store's DealerRater or Cars.com ID and save, then test again to check reading reviews and posting."); return { ok: false, lines }; }
   const kind: Kind = first[1].dr ? "dr" : "cars";
   const dealer = String(first[1][kind]);
-  try { tokens.delete(`rvw/dealer:${kind}:${dealer}`); await tokenFor(env, kind, dealer); lines.push(`Posting replies: token issued for ${rooftopFor(first[0]).name} (${LABEL[kind]} ${dealer}).`); }
-  catch (e) { ok = false; lines.push(`Posting replies: ${(e as Error).message}`); }
-  try { const n = (await fetchReviews(env, kind, dealer, unlimited(), 5)).length; lines.push(`Reading reviews: got ${n} recent review${n === 1 ? "" : "s"} for ${rooftopFor(first[0]).name}.`); }
+  try { const n = (await fetchReviews(env, kind, dealer, unlimited(), 5)).length; lines.push(`Reading reviews: got ${n} recent review${n === 1 ? "" : "s"} for ${rooftopFor(first[0]).name} (${LABEL[kind]} ${dealer}).`); }
   catch (e) { ok = false; lines.push(`Reading reviews: ${(e as Error).message}`); }
+  try { tokens.delete(`rvw/dealer:${kind}:${dealer}`); await tokenFor(env, kind, dealer); lines.push(`Posting replies: token issued for ${rooftopFor(first[0]).name}.`); }
+  catch (e) { ok = false; lines.push(`Posting replies: ${(e as Error).message}`); }
   return { ok, lines };
 }
 
