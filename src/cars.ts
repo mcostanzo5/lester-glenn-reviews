@@ -21,14 +21,25 @@ const base = (env: Env) => (env.CARS_API_BASE || "https://services.dealerrater.c
 export const isApiSource = (id: string) => id.startsWith("dr/") || id.startsWith("cars/");
 export function externalConfigured(env: Env) { return !!env.CARS_API_KEY; }
 
-export async function getIds(env: Env): Promise<Record<string, { dr?: string; cars?: string }>> {
+export type StoreIds = { dr?: string; cars?: string; portal?: string };
+export const postingOn = (env: Env) => (env.CARS_POSTING || "off").toLowerCase() === "on";
+
+/** Link to the store's unanswered reviews in the DealerRater dealer portal, filtered to one source. */
+export function portalLink(portal: string | undefined, kind: Kind): string | null {
+  if (!portal || !/^\d+$/.test(portal)) return null;
+  const q = new URLSearchParams({ StartDate: "01/01/2023", EndDate: "12/31/2035", ReviewSource: kind === "dr" ? "DealerRater" : "Cars",
+    Filter: "AllReviews", ReviewResponseStatus: "NoResponseEntered", SearchTerm: "", TaggedEmployee: "", TaggedEmployeeName: "" });
+  return `https://www.dealerrater.com/dp/${portal}/reviews?${q}`;
+}
+
+export async function getIds(env: Env): Promise<Record<string, StoreIds>> {
   try {
     const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'external_ids'").first<{ value: string }>();
     return row ? JSON.parse(row.value) : {};
   } catch { return {}; }
 }
 
-export async function saveIds(env: Env, ids: Record<string, { dr?: string; cars?: string }>, by: string) {
+export async function saveIds(env: Env, ids: Record<string, StoreIds>, by: string) {
   await env.DB.prepare(`INSERT INTO settings (key, value, updated_by, updated_at) VALUES ('external_ids', ?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_by=excluded.updated_by, updated_at=excluded.updated_at`)
     .bind(JSON.stringify(ids), by, nowIso()).run();
@@ -150,13 +161,13 @@ export async function syncExternal(env: Env, budget: Budget, notes: string[]): P
     if (v.dr) jobs.push({ rooftop, kind: "dr", dealer: String(v.dr) });
     if (v.cars) jobs.push({ rooftop, kind: "cars", dealer: String(v.cars) });
   }
-  if (!jobs.length) return 0;
+  if (!jobs.length) { notes.push("DealerRater/Cars.com: no store IDs entered yet (Settings > DealerRater and Cars.com)."); return 0; }
   let start = 0;
   try { start = parseInt((await env.DB.prepare("SELECT value FROM settings WHERE key = 'external:next'").first<{ value: string }>())?.value || "0", 10) || 0; } catch { /* */ }
   let done = 0, added = 0, updated = 0;
   const errors: string[] = [];
   for (; done < jobs.length; done++) {
-    if (!budget.has(4)) break; // leave room for drafting and posting
+    if (!budget.has(2)) break; // leave a little room for the rest of the run
     const j = jobs[(start + done) % jobs.length];
     try {
       const r = await upsert(env, j.rooftop, j.kind, j.dealer, await fetchReviews(env, j.kind, j.dealer, budget));
@@ -169,9 +180,9 @@ export async function syncExternal(env: Env, budget: Budget, notes: string[]): P
     await env.DB.prepare(`INSERT INTO settings (key, value, updated_by, updated_at) VALUES ('external:next', ?, 'agent', ?)
       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).bind(String((start + done) % jobs.length), nowIso()).run();
   } catch { /* */ }
-  if (added) notes.push(`${added} new DealerRater/Cars.com review${added === 1 ? "" : "s"}.`);
+  notes.push(`DealerRater/Cars.com: checked ${done} of ${jobs.length} listing${jobs.length === 1 ? "" : "s"}, ${added} new review${added === 1 ? "" : "s"}${errors.length ? `, ${errors.length} problem${errors.length === 1 ? "" : "s"}` : ""}.`);
   if (updated) notes.push(`${updated} DealerRater/Cars.com review${updated === 1 ? " was" : "s were"} updated by the reviewer.`);
-  if (done < jobs.length) notes.push(`DealerRater/Cars.com: checked ${done} of ${jobs.length} listings this run; the rest go next run.`);
+  if (done < jobs.length) notes.push(`DealerRater/Cars.com: the other ${jobs.length - done} listing${jobs.length - done === 1 ? "" : "s"} will be checked next run.`);
   notes.push(...errors.slice(0, 3));
   return added;
 }

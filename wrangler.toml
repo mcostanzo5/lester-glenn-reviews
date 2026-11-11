@@ -61,6 +61,9 @@ STALE_ESCALATION_DAYS = "7"
 # DealerRater / Cars.com Reputation API. Production; for testing use https://services.staging.dealerrater.com
 # The API key, client ID and client secret are Cloudflare secrets: CARS_API_KEY, CARS_CLIENT_ID, CARS_CLIENT_SECRET
 CARS_API_BASE = "https://services.dealerrater.com"
+# Set to "on" once Cars Commerce enables writing responses (needs CARS_CLIENT_ID / CARS_CLIENT_SECRET).
+# Until then, DealerRater and Cars.com replies are copied and posted by hand.
+CARS_POSTING = "off"
 # Weekly backup to SharePoint. Leave BACKUP_SITE blank until IT has added the
 # Files.ReadWrite.All permission (see README), then set it, e.g.
 # BACKUP_SITE = "lesterglenn.sharepoint.com/sites/Marketing"

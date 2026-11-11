@@ -428,6 +428,12 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
   let locs: Loc[] = [];
 
   try {
+    // 1a. DealerRater and Cars.com first, so a long Google sync can't use up the run's requests
+    if (m !== "dry_run" && externalConfigured(env)) {
+      try { s.synced += await syncExternal(env, budget, s.notes); }
+      catch (e) { if (e instanceof BudgetExhausted) throw e; s.notes.push(`DealerRater/Cars.com: ${(e as Error).message}`); }
+    }
+
     // 1. New reviews from every store
     if (m !== "dry_run") {
       try {
@@ -440,10 +446,6 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
         }
         updatedNotes.length = 0;
         s.synced += await syncNew(env, client, locs, budget, s.notes);
-        if (externalConfigured(env)) {
-          try { s.synced += await syncExternal(env, budget, s.notes); }
-          catch (e) { if (e instanceof BudgetExhausted) throw e; s.notes.push(`DealerRater/Cars.com: ${(e as Error).message}`); }
-        }
         const upd = updatedNotes.reduce((a, n) => a + n, 0);
         if (upd) s.notes.push(`${upd} review${upd === 1 ? " was" : "s were"} updated by the reviewer and moved back to the Inbox.`);
       } catch (e) {

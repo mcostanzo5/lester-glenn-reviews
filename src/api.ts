@@ -8,7 +8,7 @@ import { draftAndRoute, HAND_REMOVED, isHandRemoved, logEvent, markRemoved, post
 import { clearSamples, loadSamples } from "./samples";
 import { backupConfigured, lastBackup, runBackup } from "./backup";
 import { getLessons, lessonFromNote, saveLessons } from "./feedback";
-import { CarsError, EXTERNAL_STORES, externalConfigured, findDealers, getIds, isApiSource, saveIds, testConnection } from "./cars";
+import { CarsError, EXTERNAL_STORES, externalConfigured, findDealers, getIds, isApiSource, portalLink, postingOn, saveIds, testConnection, type StoreIds } from "./cars";
 import { availableReplies, editStats, learnGuidelines, MIN_REPLIES, suggestFromEdits } from "./learn";
 import { clearGuidelinesCache, currentGuidelines } from "./guidelines";
 import { CONCERN_LABEL, FIELDS_FOR, OUTCOMES, TEAMS_FOR, buildEmail, lastEscalation, getTeams, parseEscalation, resolveEscalation, saveTeams, sendEscalation, type Team } from "./escalate";
@@ -113,6 +113,7 @@ async function me(env: Env, user: User) {
     nextRun: mode(env) === "dry_run" ? null : nextScheduledRun(env.RUN_HOURS_ET),
     approvers: (env.REPLY_APPROVERS || "").split(",").map((e) => e.trim()).filter(Boolean),
     sources: OUTSIDE_SOURCES,
+    carsPosting: postingOn(env),
     storeNames: Object.fromEntries([...ROOFTOPS, DEFAULT_ROOFTOP].map((r) => [r.key, r.name])),
     rooftops: visibleRooftops(user).map((r) => ({ ...r, open: map[r.key] || 0 })),
   });
@@ -209,7 +210,8 @@ async function draftWithNotes(env: Env, r: ReviewRow, user: User, requireNotes: 
   if (!d.ok) return `The draft didn't work: ${d.risk_flags[0] || "unknown problem"}. Try again.`;
   const reason = feedback ? "Redrafted after a thumbs down" : notes.length ? `Drafted with ${notes.length} management note${notes.length === 1 ? "" : "s"}` : "Redrafted";
   // Replies drafted with notes always wait for an approver; outside reviews stay outside
-  const status = source ? "external" : "pending";
+  // DealerRater / Cars.com reviews stay in the Inbox like Google ones; pasted-in reviews stay as outside reviews
+  const status = source && !isApiSource(r.id) ? "external" : "pending";
   await env.DB.prepare("UPDATE reviews SET draft=?, department=?, sentiment=?, risk_level=?, risk_flags=?, route_reason=?, status=? WHERE id=?")
     .bind(d.reply, d.department, d.sentiment, d.risk_level, JSON.stringify(d.risk_flags), reason, status, r.id).run();
   await rememberOriginal(env, r.id, d.reply);
@@ -339,7 +341,12 @@ async function reviewDetail(env: Env, user: User, id: string) {
     ? { listing: r.location_title, moved: !!(r as any).rooftop_override } : null;
   let feedback: any[] = [];
   try { feedback = (await env.DB.prepare("SELECT rating, note, lesson, created_by, created_at FROM draft_feedback WHERE review_id = ? ORDER BY id DESC LIMIT 5").bind(id).all()).results; } catch { /* 0011 */ }
-  return json({ review: r, reassign, feedback, events, escalation, staff, notes, canNote: user.role !== "link" && (canAct(user, r.rooftop_key) || user.canReply) });
+  let portal: string | null = null;
+  if (isApiSource(r.id)) {
+    const ids = await getIds(env);
+    portal = portalLink(ids[r.rooftop_key]?.portal, r.id.startsWith("dr/") ? "dr" : "cars");
+  }
+  return json({ review: r, portal, reassign, feedback, events, escalation, staff, notes, canNote: user.role !== "link" && (canAct(user, r.rooftop_key) || user.canReply) });
 }
 
 async function reviewAction(env: Env, user: User, id: string, action: string, body: any, origin: string) {
@@ -373,7 +380,8 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
     if (user.role === "link" || !(canAct(user, r.rooftop_key) || user.canReply)) return fail("You can't add notes to this review.", 403);
   } else if (!replyActions.includes(action) && !canAct(user, r.rooftop_key)) return fail("You have view-only access to this store.", 403);
   // Reviews from other sites we can't post to (pasted in by hand). DealerRater and Cars.com post through their API.
-  const outside = !!(r as any).source && !isApiSource(r.id);
+  // Reviews we can't post to: pasted in by hand, and DealerRater / Cars.com until write access is turned on
+  const outside = !!(r as any).source && (!isApiSource(r.id) || !postingOn(env));
   const reply = typeof body?.reply === "string" ? cleanReply(body.reply) : "";
 
   if (action === "save") {
@@ -411,7 +419,7 @@ async function reviewAction(env: Env, user: User, id: string, action: string, bo
     await env.DB.prepare("UPDATE reviews SET status='dismissed', decided_by=?, decided_at=? WHERE id=?").bind(user.email, nowIso(), id).run();
     await logEvent(env, id, user.email, "dismissed", String(body?.note || "").slice(0, 500));
   } else if (action === "reopen") {
-    await env.DB.prepare("UPDATE reviews SET status=? WHERE id=?").bind(outside ? "external" : "pending", id).run();
+    await env.DB.prepare("UPDATE reviews SET status=? WHERE id=?").bind(outside && !isApiSource(id) ? "external" : "pending", id).run();
     await logEvent(env, id, user.email, "reopened");
   } else if (action === "escalate") {
     const parsed = parseEscalation(env, body);
@@ -663,12 +671,14 @@ async function admin(env: Env, user: User, req: Request, path: string, url: URL,
     if (req.method === "POST") {
       try {
         if (body?.op === "save") {
-          const ids: Record<string, { dr?: string; cars?: string }> = {};
+          const ids: Record<string, StoreIds> = {};
           for (const s of EXTERNAL_STORES()) {
             const v = body.ids?.[s.key] || {};
-            const dr = String(v.dr || "").trim(), cars = String(v.cars || "").trim();
-            if ((dr && !/^\d+$/.test(dr)) || (cars && !/^[\w-]+$/.test(cars))) return fail(`Check the IDs for ${s.name}: DealerRater IDs are numbers.`);
-            if (dr || cars) ids[s.key] = { ...(dr ? { dr } : {}), ...(cars ? { cars } : {}) };
+            const dr = String(v.dr || "").trim(), cars = String(v.cars || "").trim(), portal = String(v.portal || "").trim();
+            if ((dr && !/^\d+$/.test(dr)) || (portal && !/^\d+$/.test(portal)) || (cars && !/^[\w-]+$/.test(cars))) {
+              return fail(`Check the IDs for ${s.name}: DealerRater and portal IDs are numbers.`);
+            }
+            if (dr || cars || portal) ids[s.key] = { ...(dr ? { dr } : {}), ...(cars ? { cars } : {}), ...(portal ? { portal } : {}) };
           }
           await saveIds(env, ids, user.email);
           return json({ saved: true });
@@ -681,6 +691,7 @@ async function admin(env: Env, user: User, req: Request, path: string, url: URL,
     return json({
       configured: { key: externalConfigured(env), client: !!(env.CARS_CLIENT_ID && env.CARS_CLIENT_SECRET) },
       server: env.CARS_API_BASE || "https://services.dealerrater.com",
+      posting: postingOn(env),
       stores: EXTERNAL_STORES().map((s) => ({ key: s.key, name: s.name })),
       ids: await getIds(env),
     });

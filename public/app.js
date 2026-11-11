@@ -351,7 +351,8 @@ function renderDetail(data) {
   try { flags = JSON.parse(r.risk_flags || "[]"); } catch { /* ignore */ }
 
   // Pasted-in reviews from sites we can't post to; DealerRater and Cars.com post through their API
-  const viaApi = /^(dr|cars)\//.test(r.id);
+  const fromApi = /^(dr|cars)\//.test(r.id);
+  const viaApi = fromApi && state.me.carsPosting; // posting straight to DealerRater / Cars.com is switched on
   const outside = r.source && !viaApi ? r.source : "";
   let replyBlock = "";
   if (r.status === "removed") {
@@ -372,7 +373,7 @@ function renderDetail(data) {
         <button class="btn quiet danger" data-act="dismiss">Dismiss</button>
       </div>
       ${r.draft ? thumbsHtml(data.feedback) : ""}
-      <p class="meta">This review is on ${esc(outside)}, so the response isn't posted from here. Copy it, post it on ${esc(outside)}${r.source_url ? ` (<a href="${esc(r.source_url)}" target="_blank" rel="noopener">open the review</a>)` : ""}, then click Mark as responded.</p>`}`;
+      <p class="meta">This review is on ${esc(outside)}, so the response isn't posted from here. Copy it, post it on ${esc(outside)}${data.portal ? ` (<a href="${esc(data.portal)}" target="_blank" rel="noopener">open ${esc(storeName(r.rooftop_key).replace(/^Lester Glenn /, ""))}'s unanswered ${esc(outside)} reviews</a>)` : r.source_url ? ` (<a href="${esc(r.source_url)}" target="_blank" rel="noopener">open the review</a>)` : ""}, then click Mark as responded.${fromApi && !data.portal ? " Add this store's Portal ID in Settings to get a direct link." : ""}</p>`}`;
   } else if (answered) {
     replyBlock = `<label class="lbl">Posted reply</label><div class="posted-reply">${esc(r.reply_text || "")}</div>
       <p class="meta">${r.reply_time ? "Replied " + ago(r.reply_time) : ""}</p>`;
@@ -405,7 +406,7 @@ function renderDetail(data) {
   $("#detail").innerHTML = `
     <div class="detail-head">
       <div><h2>${esc(storeName(r.rooftop_key))}</h2><p class="meta">${r.reviewer_name ? `<b class="reviewer-name">${esc(r.reviewer_name)}</b>, ` : ""}${outside ? new Date(r.create_time).toLocaleDateString(undefined, { timeZone: "America/New_York", dateStyle: "medium" }) : new Date(r.create_time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</p>
-        ${r.source ? `<p class="meta"><span class="pill source">${esc(r.source)}</span>${r.source_url ? ` <a href="${esc(r.source_url)}" target="_blank" rel="noopener">View on ${esc(r.source)}</a>` : ""}</p>` : ""}</div>
+        ${r.source ? `<p class="meta"><span class="pill source">${esc(r.source)}</span>${data.portal ? ` <a href="${esc(data.portal)}" target="_blank" rel="noopener">Unanswered ${esc(r.source)} reviews for this store</a>` : r.source_url ? ` <a href="${esc(r.source_url)}" target="_blank" rel="noopener">View on ${esc(r.source)}</a>` : ""}</p>` : ""}</div>
       <div class="head-actions">
         ${canAct && escalation && escalation.ready && escalation.teams ? `<button class="btn escalate" id="escalateBtn">${r.escalation_open ? "Follow up" : "Escalate"}</button>` : ""}
         ${linkOnly ? "" : `<button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button>`}
@@ -1537,13 +1538,14 @@ function externalPanel(x) {
   const ready = x.configured.key;
   const rows = x.stores.map((st) => `<tr><td>${esc(st.name)}</td>
     <td><input class="ext-id" data-store="${esc(st.key)}" data-kind="dr" value="${esc(x.ids[st.key]?.dr || "")}" inputmode="numeric" placeholder="e.g. 12345"></td>
-    <td><input class="ext-id" data-store="${esc(st.key)}" data-kind="cars" value="${esc(x.ids[st.key]?.cars || "")}" placeholder="Cars.com dealer ID"></td></tr>`).join("");
+    <td><input class="ext-id" data-store="${esc(st.key)}" data-kind="cars" value="${esc(x.ids[st.key]?.cars || "")}" placeholder="Cars.com dealer ID"></td>
+    <td><input class="ext-id" data-store="${esc(st.key)}" data-kind="portal" value="${esc(x.ids[st.key]?.portal || "")}" inputmode="numeric" placeholder="e.g. 40175"></td></tr>`).join("");
   return `<div class="panel" id="extPanel"><h3>DealerRater and Cars.com</h3>
-    <p class="note">New reviews are pulled in every run, and approved replies post straight to the site.
+    <p class="note">New reviews are pulled in every run. ${x.posting ? "Approved replies post straight to the site." : "Replies are copied and posted by hand in the DealerRater dealer portal; the Portal ID (the number in dealerrater.com/dp/____/) links each review to that store's unanswered reviews."}
       Server: <code>${esc(x.server)}</code>.
       API key: <b>${ready ? "set" : "not set"}</b>. Client ID and secret (for posting): <b>${x.configured.client ? "set" : "not set"}</b>.
       ${ready ? "" : "Add <code>CARS_API_KEY</code>, <code>CARS_CLIENT_ID</code> and <code>CARS_CLIENT_SECRET</code> as Cloudflare secrets."}</p>
-    <div class="table-wrap"><table class="ext-table"><thead><tr><th>Store</th><th>DealerRater ID</th><th>Cars.com ID</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="table-wrap"><table class="ext-table"><thead><tr><th>Store</th><th>DealerRater ID</th><th>Cars.com ID</th><th title="The number in your dealer portal address: dealerrater.com/dp/____/">Portal ID</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="actions">
       <button class="btn primary" id="extSave">Save IDs</button>
       <button class="btn" id="extFind" ${ready ? "" : "disabled"}>Find our DealerRater IDs</button>

@@ -360,6 +360,15 @@ Setup:
    (**Find our DealerRater IDs** searches by name) and Cars.com dealer ID (from your
    Cars.com dealer account), then **Test connection**.
 
+Until Cars Commerce enables writing responses, `CARS_POSTING = "off"` in
+wrangler.toml: DealerRater and Cars.com reviews get drafts in the Inbox, but you
+**Copy** the reply, post it in the DealerRater dealer portal, then **Mark as
+responded**. Add each store's **Portal ID** (the number in
+`dealerrater.com/dp/____/`) in Settings, and each review links to that store's
+unanswered DealerRater or Cars.com reviews in the portal. Set `CARS_POSTING = "on"`
+once write access and the client ID and secret are in place, and approving posts
+directly.
+
 Each listing is one request per run, so with every store connected, use Workers Paid.
 Statistics still cover Google only.
 

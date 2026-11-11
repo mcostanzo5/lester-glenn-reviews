@@ -22,6 +22,7 @@ export interface Env {
   STALE_ESCALATION_DAYS?: string; // days without a follow-up before managers are reminded (default 7)
   CARS_API_BASE?: string;   // DealerRater / Cars.com Reputation API (production unless set to staging)
   CARS_API_KEY?: string;
+  CARS_POSTING?: string;   // "on" once Cars Commerce enables writing responses; until then replies are copied and posted by hand
   CARS_CLIENT_ID?: string;
   CARS_CLIENT_SECRET?: string;
   BACKUP_SITE?: string;   // e.g. lesterglenn.sharepoint.com/sites/Marketing
