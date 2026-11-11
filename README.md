@@ -16,6 +16,7 @@ same review.
 | `src/router.ts` | Rules for what can auto-post, including the keyword list that always goes to a manager |
 | `src/guidelines.ts` | Built-in starter guidelines, plus the safety rules that always apply |
 | `src/staff.ts` | Finds employee names in reviews, matches them to each store's roster, tallies by month |
+| `src/cars.ts` | DealerRater and Cars.com: review sync, replies, settings tools |
 | `src/feedback.ts` | Thumbs up/down on drafts: liked examples and lessons for future drafts |
 | `src/backup.ts` | Weekly backup of the database to SharePoint |
 | `src/learn.ts` | Writes new guidelines from your team's real replies (Settings > Reply guidelines) |
@@ -200,7 +201,7 @@ out. If a token stops working, the dashboard asks them to sign out and back in.
 **One-time setup**
 1. Run the SQL in `migrations/0003_escalations.sql` in the D1 console. Run it
    once only (a second run gives harmless "duplicate column" errors). Then run
-   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql`, `migrations/0010_insights.sql`, `migrations/0011_feedback.sql` and `migrations/0012_updated_reviews.sql`.
+   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql`, `migrations/0010_insights.sql`, `migrations/0011_feedback.sql`, `migrations/0012_updated_reviews.sql` and `migrations/0013_external_reviews.sql`.
 2. IT adds two **delegated** Microsoft Graph permissions to the Lester Glenn
    Reviews app registration, **Mail.Send** and **offline_access**, and clicks
    **Grant admin consent**. Delegated Mail.Send only allows sending as the person
@@ -244,6 +245,16 @@ stores) and a range of months: bigger words come up in more reviews, green means
 mostly positive, red mostly negative. Click a word or theme for how many reviews
 mention it, its share of reviews, its month-by-month trend, and the reviews
 themselves. For older months, click **Read reviews now** on the Topics or Staff tab.
+
+## Overdue escalation reminder
+
+The first time a manager or admin opens the dashboard each day (per browser), a
+pop-up lists open escalations in their stores whose last email, first or
+follow-up, was `STALE_ESCALATION_DAYS` (default 7) or more days ago. With one, it
+says how many days it's been and offers **Follow up now**, which opens the review
+with the follow-up form. With several, each has a **Follow up** button, plus **Take
+me to escalations needing my attention**, which filters the Escalations tab to the
+overdue ones.
 
 ## Escalation outcomes and recovered reviews
 
@@ -329,6 +340,28 @@ to a store counts it in that store's stats, sends escalations to that store's
 teams, and matches staff names against that store's roster. The reply still
 comes from the Auto Group listing, since that's where it's posted. The move
 sticks through future syncs, and it can be moved back.
+
+## DealerRater and Cars.com
+
+Reviews come in through the Cars Commerce Reputation API and work like Google
+reviews: drafts, Inbox, approvals, escalations, notes, thumbs, staff, topics, and
+edit detection. Approving posts the reply straight to DealerRater or Cars.com
+(or replaces our existing response there). DealerRater's tagged employees are
+added to the review text as "Employees worked with:", so they count on the Staff
+tab. The Cars.com feed is filtered to Cars.com reviews, so DealerRater reviews it
+syndicates aren't duplicated.
+
+Setup:
+1. Cloudflare secrets: `CARS_API_KEY` (required for everything), `CARS_CLIENT_ID`
+   and `CARS_CLIENT_SECRET` (for posting replies).
+2. `CARS_API_BASE` in wrangler.toml is production (`https://services.dealerrater.com`);
+   use `https://services.staging.dealerrater.com` to test.
+3. **Settings > DealerRater and Cars.com**: enter each store's DealerRater ID
+   (**Find our DealerRater IDs** searches by name) and Cars.com dealer ID (from your
+   Cars.com dealer account), then **Test connection**.
+
+Each listing is one request per run, so with every store connected, use Workers Paid.
+Statistics still cover Google only.
 
 ## Manual escalations (other review sites)
 

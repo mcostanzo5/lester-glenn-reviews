@@ -1,0 +1,1705 @@
+"use strict";
+
+const state = { me: null, view: "inbox", rooftop: "", filters: { status: "", stars: "", q: "", days: "", start: "", end: "" }, page: 0, rows: [], selected: null, statsDays: 90, statsStart: "", statsEnd: "" };
+
+const STATUS = {
+  new: ["Waiting for draft", ""],
+  pending: ["Needs review", "pending"],
+  ready: ["Draft ready", "ready"],
+  approved: ["Approved, posts when live", "approved"],
+  auto_posted: ["Auto-posted", "posted"],
+  approved_posted: ["Posted by manager", "posted"],
+  replied_external: ["Replied in Google", "posted"],
+  dismissed: ["Dismissed", ""],
+  old_unanswered: ["Unanswered, older", ""],
+  error: ["Post failed", "error"],
+  external: ["Not responded yet", "pending"],
+  external_done: ["Responded", "posted"],
+  removed: ["Removed from Google", ""],
+};
+const ANSWERED = ["auto_posted", "approved_posted", "replied_external", "external_done"];
+const OPEN_STATUSES = ["new", "pending", "ready", "approved", "error", "old_unanswered", "external"];
+
+const $ = (sel) => document.querySelector(sel);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function api(path, opts = {}) {
+  const init = { method: opts.method || "GET", headers: {} };
+  if (init.method !== "GET") {
+    init.headers["content-type"] = "application/json";
+    init.headers["x-requested-with"] = "reviews-app";
+    init.body = JSON.stringify(opts.body || {});
+  }
+  const res = await fetch(path, init);
+  const data = await res.json().catch(() => ({ error: `The server returned an unexpected response (${res.status}).` }));
+  if (res.status === 401) {
+    // Session expired: send them back through Microsoft sign-in, then return here
+    location.href = `/auth/login?returnTo=${encodeURIComponent(location.pathname + location.search)}`;
+    throw new Error("Signing you in again\u2026");
+  }
+  if (!res.ok) { const e = new Error(data.error || `Request failed (${res.status})`); e.status = res.status; e.data = data; throw e; }
+  return data;
+}
+
+function toast(msg, bad = false) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "toast" + (bad ? " bad" : "");
+  t.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => (t.hidden = true), bad ? 6000 : 3000);
+}
+
+function stars(n, cls = "stars") {
+  if (!n) return `<span class="${cls}" aria-label="No rating">No rating</span>`;
+  return `<span class="${cls}" aria-label="${n} out of 5 stars">${"\u2605".repeat(n)}<span class="off">${"\u2605".repeat(5 - n)}</span></span>`;
+}
+
+function ago(iso) {
+  const ms = Date.now() - Date.parse(iso);
+  const h = ms / 3600000;
+  if (h < 1) return `${Math.max(1, Math.round(ms / 60000))} min ago`;
+  if (h < 24) return `${Math.round(h)} hr ago`;
+  const d = Math.round(h / 24);
+  if (d < 45) return `${d} day${d === 1 ? "" : "s"} ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function hoursLabel(h) {
+  if (h == null) return "\u2013";
+  if (h < 48) return `${Math.round(h)}<small>hr</small>`;
+  return `${(h / 24).toFixed(1)}<small>days</small>`;
+}
+
+function pill(status, isSample) {
+  const [label, cls] = STATUS[status] || [status, ""];
+  return `<span class="pill ${cls}">${esc(label)}</span>${isSample ? ' <span class="pill sample">Sample</span>' : ""}`;
+}
+
+function storeName(key) {
+  return state.me.rooftops.find((r) => r.key === key)?.name || (state.me.storeNames || {})[key] || key;
+}
+const shortName = (key) => storeName(key).replace(/^Lester Glenn /, "");
+
+/* ---------- Shell ---------- */
+
+async function boot() {
+  try {
+    state.me = await api("/api/me");
+  } catch (e) {
+    document.body.innerHTML = `<div class="gate"><h1>Can't open the dashboard</h1><p>${esc(e.message)}</p><p><a href="/auth/logout">Sign out</a></p></div>`;
+    return;
+  }
+  const m = state.me;
+  $("#who").textContent = m.email;
+  if (m.role === "link") return bootLinkOnly();
+  const chip = $("#modeChip");
+  chip.hidden = false;
+  chip.textContent = { dry_run: "Dry run", shadow: "Shadow mode", live: "Live" }[m.mode];
+  chip.classList.toggle("live", m.mode === "live");
+  STATUS.ready = [m.autoPost ? "Ready to auto-post" : "Draft ready", "ready"];
+  renderRunStatus();
+  const mb = $("#manualEscBtn");
+  if (mb && (m.role === "admin" || m.role === "manager")) { mb.hidden = false; mb.onclick = openManualEscalation; }
+  if (m.role === "admin" || m.role === "manager") setTimeout(checkStaleEscalations, 800);
+  const banner = $("#banner");
+  if (m.mode === "dry_run") { banner.hidden = false; banner.textContent = "Dry run: showing sample reviews. Nothing is read from or posted to Google."; }
+  if (m.mode === "shadow") { banner.hidden = false; banner.textContent = "Shadow mode: these are real reviews, but no replies are posted to Google yet."; }
+  $("#settingsTab").hidden = m.role !== "admin";
+
+  $("#tabs").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-view]");
+    if (b) { state.filters.source = ""; state.staleOnly = false; setView(b.dataset.view); }
+  });
+  $("#storeSelect").addEventListener("change", (e) => setRooftop(e.target.value));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.selected) closeDetail(); });
+  renderRail();
+  setView("inbox");
+  const linked = new URLSearchParams(location.search).get("review");
+  if (linked) { openDetail(linked); history.replaceState(null, "", "/"); }
+}
+
+function bootLinkOnly() {
+  document.body.classList.add("link-mode");
+  const id = new URLSearchParams(location.search).get("review");
+  if (!id) {
+    document.querySelector(".shell").innerHTML = `<div class="gate"><h1>Lester Glenn Reviews</h1>
+      <p>You can open reviews from the escalation emails sent to you. If you need access to the full dashboard, ask an admin.</p></div>`;
+    return;
+  }
+  openDetail(id);
+}
+
+function renderRail() {
+  const m = state.me;
+  $("#escTab").hidden = m.escalations === null || m.escalations === undefined;
+  $("#escCount").textContent = m.escalations ? String(m.escalations) : "";
+  const total = m.rooftops.reduce((a, r) => a + r.open, 0);
+  const btn = (key, name, town, n) => `<button data-key="${esc(key)}" aria-current="${state.rooftop === key}">
+      <span class="name">${esc(name)}${town ? `<span class="town">${esc(town)}</span>` : ""}</span>
+      <span class="count${n ? "" : " zero"}" aria-label="${n} in inbox">${n}</span></button>`;
+  const stores = m.rooftops.filter((r) => r.key !== "other" || r.open);
+  $("#rail").innerHTML = (stores.length > 1 ? `<div class="group">${btn("", "All stores", "", total)}</div>` : "") +
+    stores.map((r) => btn(r.key, r.name.replace(/^Lester Glenn /, ""), r.town, r.open)).join("");
+  $("#rail").onclick = (e) => { const b = e.target.closest("button[data-key]"); if (b) setRooftop(b.dataset.key); };
+  $("#storeSelect").innerHTML = (stores.length > 1 ? `<option value="">All stores (${total} in inbox)</option>` : "") +
+    stores.map((r) => `<option value="${esc(r.key)}" ${state.rooftop === r.key ? "selected" : ""}>${esc(r.name)} (${r.open})</option>`).join("");
+}
+
+const ET = "America/New_York";
+const etDay = (d) => d.toLocaleDateString("en-US", { timeZone: ET });
+function whenLabel(iso) {
+  const d = new Date(iso), now = Date.now();
+  const time = d.toLocaleTimeString(undefined, { timeZone: ET, hour: "numeric", minute: "2-digit" });
+  if (etDay(d) === etDay(new Date(now))) return `today ${time}`;
+  if (etDay(d) === etDay(new Date(now - 86400000))) return `yesterday ${time}`;
+  if (etDay(d) === etDay(new Date(now + 86400000))) return `tomorrow ${time}`;
+  return d.toLocaleString(undefined, { timeZone: ET, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function renderRunStatus() {
+  const el = $("#runStatus"), m = state.me;
+  if (!el || m.role === "link") return;
+  const last = m.lastRun
+    ? `Last run ${whenLabel(m.lastRun.at)}${m.lastRun.errors ? ` <span class="run-err">(${m.lastRun.errors} error${m.lastRun.errors === 1 ? "" : "s"})</span>` : ""}`
+    : "No runs yet";
+  el.innerHTML = last + (m.nextRun ? ` <span class="run-next">\u00b7 Next ${whenLabel(m.nextRun)}</span>` : "");
+  el.title = m.lastRun ? `Last run finished ${new Date(m.lastRun.at).toLocaleString(undefined, { timeZone: ET })} Eastern${m.lastRun.manual ? " (started by hand)" : " (scheduled)"}` : "";
+  el.hidden = false;
+}
+
+async function refreshCounts() {
+  try { state.me = await api("/api/me"); renderRail(); renderRunStatus(); } catch { /* keep old counts */ }
+}
+
+function setRooftop(key) {
+  state.rooftop = key;
+  renderRail();
+  setView(state.view);
+}
+
+function setView(view) {
+  state.view = view;
+  state.page = 0;
+  document.querySelectorAll("#tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.view === view)));
+  if (view === "stats") return renderStats();
+  if (view === "staff") return renderStaff();
+  if (view === "topics") return renderTopics();
+  if (view === "settings") return renderSettings();
+  loadList();
+}
+
+/* ---------- Review lists ---------- */
+
+async function loadList(append = false) {
+  const q = new URLSearchParams({ view: state.view, page: String(state.page) });
+  if (state.rooftop) q.set("rooftop", state.rooftop);
+  if (state.view === "all") for (const [k, v] of Object.entries(state.filters)) if (v && !(k === "days" && v === "custom")) q.set(k, v);
+  if (state.view === "escalations" && state.staleOnly) q.set("stale", "1");
+  const v = $("#view");
+  if (!append) v.innerHTML = filtersHtml() + `<div class="empty-state">Loading reviews\u2026</div>`;
+  bindFilters();
+  try {
+    const data = await api(`/api/reviews?${q}`);
+    state.rows = append ? state.rows.concat(data.reviews) : data.reviews;
+    renderList(data.more);
+  } catch (e) {
+    v.innerHTML = filtersHtml() + `<div class="empty-state"><strong>Reviews didn't load</strong>${esc(e.message)}</div>`;
+    bindFilters();
+  }
+}
+
+function filtersHtml() {
+  if (state.view === "escalations" && state.staleOnly) {
+    return `<div class="stale-banner">Showing escalations with no follow-up in ${state.staleDays || 7}+ days. <button class="link-btn" id="showAllEsc">Show all escalations</button></div>`;
+  }
+  if (state.view !== "all") return "";
+  const f = state.filters;
+  const opt = (val, label, cur) => `<option value="${val}" ${cur === val ? "selected" : ""}>${label}</option>`;
+  return `<form class="filters" id="filters" role="search" onsubmit="return false">
+    <label class="sr" for="fStatus">Status</label>
+    <select id="fStatus">${opt("", "Any status", f.status)}${opt("open", "Not answered", f.status)}${opt("answered", "Answered", f.status)}
+      ${opt("pending", "Needs review", f.status)}${opt("noreply", "No reply on the site yet", f.status)}${opt("dismissed", "Dismissed", f.status)}${opt("removed", "Removed from Google", f.status)}${opt("old_unanswered", "Not answered, over 14 days old", f.status)}</select>
+    <label class="sr" for="fDays">Time range</label>
+    <select id="fDays">${opt("", "Any time", f.days)}${opt("7", "Last 7 days", f.days)}${opt("30", "Last 30 days", f.days)}${opt("90", "Last 90 days", f.days)}${opt("365", "Last 12 months", f.days)}${opt("custom", "Custom range\u2026", f.days)}</select>
+    <label class="sr" for="fStars">Rating</label>
+    <select id="fStars">${opt("", "Any rating", f.stars)}${opt("low", "3 stars or less", f.stars)}${opt("high", "4 and 5 stars", f.stars)}</select>
+    <label class="sr" for="fQ">Search</label>
+    <input type="search" id="fQ" placeholder="Search reviews, replies, and reviewer names" value="${esc(f.q)}">
+    ${f.days === "custom" ? `<div class="custom-range">
+      <label>From <input type="date" id="fStart" value="${esc(f.start)}" max="${new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" })}"></label>
+      <label>To <input type="date" id="fEnd" value="${esc(f.end)}" max="${new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" })}"></label>
+      ${f.start || f.end ? `<button type="button" class="btn quiet" id="fClearRange">Clear dates</button>` : ""}
+    </div>` : ""}
+  </form>`;
+}
+
+function bindFilters() {
+  const form = $("#filters");
+  if (!form) return;
+  const apply = () => {
+    const custom = $("#fDays").value === "custom";
+    let start = custom && $("#fStart") ? $("#fStart").value : "", end = custom && $("#fEnd") ? $("#fEnd").value : "";
+    if (start && end && start > end) [start, end] = [end, start];
+    state.filters = { status: $("#fStatus").value, stars: $("#fStars").value, q: $("#fQ").value.trim(), days: $("#fDays").value, start, end, source: state.filters.source || "" };
+    state.page = 0;
+    loadList();
+  };
+  $("#fStatus").onchange = apply;
+  $("#fDays").onchange = apply;
+  if ($("#fStart")) { $("#fStart").onchange = apply; $("#fEnd").onchange = apply; }
+  if ($("#fClearRange")) $("#fClearRange").onclick = () => { $("#fStart").value = ""; $("#fEnd").value = ""; apply(); };
+  $("#fStars").onchange = apply;
+  let t;
+  $("#fQ").oninput = () => { clearTimeout(t); t = setTimeout(apply, 350); };
+}
+
+function bindStaleBanner() {
+  if ($("#showAllEsc")) $("#showAllEsc").onclick = () => { state.staleOnly = false; setView("escalations"); };
+}
+
+function renderList(more) {
+  const v = $("#view");
+  setTimeout(bindStaleBanner, 0);
+  if (!state.rows.length) {
+    const msg = state.view === "escalations" && state.staleOnly
+      ? `<strong>Nothing overdue</strong>Every open escalation has had an email in the last ${state.staleDays || 7} days.`
+      : state.view === "escalations"
+      ? `<strong>No open escalations</strong>Reviews that have been emailed to a store team show up here until someone marks them resolved.`
+      : state.view === "inbox"
+      ? `<strong>Inbox is clear</strong>Every review has a reply. New reviews show up here until they're answered.${state.me.mode === "dry_run" && state.me.role === "admin" ? " Load sample data from Settings to try it out." : ""}`
+      : `<strong>No reviews match</strong>Try a different filter or store.`;
+    v.innerHTML = filtersHtml() + `<div class="empty-state">${msg}</div>`;
+    bindFilters();
+    return;
+  }
+  v.innerHTML = filtersHtml() + `<div class="list">${state.rows.map(rowHtml).join("")}</div>` +
+    (more ? `<button class="btn more" id="more">Show more</button>` : "");
+  bindFilters();
+  v.querySelector(".list").onclick = (e) => {
+    const done = e.target.closest("[data-resolve]");
+    if (done) return resolveFromList(done.dataset.resolve, done);
+    const q = e.target.closest("[data-esc]");
+    if (q) return openDetail(q.dataset.esc, true);
+    const b = e.target.closest(".row");
+    if (b) openDetail(b.dataset.id);
+  };
+  if (more) $("#more").onclick = () => { state.page++; loadList(true); };
+  // Keep focus in the search box while typing
+  const q = $("#fQ");
+  if (q && document.activeElement !== q && state.filters.q) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
+}
+
+function rowHtml(r) {
+  const text = r.text ? esc(r.text) : "Rating only, no written review";
+  const escView = state.view === "escalations";
+  const hot = (r.escalation_open || 0) > 0 && !ANSWERED.includes(r.status);
+  const updated = !!r.reviewer_updated_at && !ANSWERED.includes(r.status) && r.status !== "removed";
+  const resolveBtn = escView && (state.me.role === "admin" || state.me.role === "manager")
+    ? `<button class="esc-resolve" data-resolve="${esc(r.id)}" title="The team responded: remove from Escalations">Resolved</button>` : "";
+  const quick = (state.me.role === "admin" || state.me.role === "manager")
+    ? `<button class="esc-quick" data-esc="${esc(r.id)}" aria-label="Escalate this review" title="${r.escalation_open ? "Follow up with the team" : "Escalate"}">!</button>` : "";
+  const followups = (r.escalation_open || 0) - 1;
+  const when = escView
+    ? `<span class="when-line">First sent ${ago(r.escalation_first_at)}</span><span class="when-line">${r.escalation_count} ${r.escalation_count === 1 ? "email" : "emails"}, last ${ago(r.escalation_last_at)}</span>${followups > 0 ? `<span class="when-line late">${followups} follow-up${followups === 1 ? "" : "s"}, no response</span>` : ""}`
+    : `${ago(r.create_time)}<br>${hot ? `<span class="pill hot">Escalated</span> ` : ""}${updated ? `<span class="pill updated" title="The reviewer changed this review">Updated</span> ` : ""}${pill(r.status, r.is_sample)}${r.escalation_count ? ` <span class="pill esc" title="Emails sent to the team about this review">\u2709 ${r.escalation_count}</span>` : ""}`;
+  return `<div class="row-wrap${quick ? " has-quick" : ""}${resolveBtn ? " has-resolve" : ""}${hot ? " escalated" : ""}"><button class="row" data-id="${esc(r.id)}" aria-current="${state.selected === r.id}">
+    <div class="stars-col">${stars(r.stars)}</div>
+    <div><div class="store">${esc(shortName(r.rooftop_key))}${r.source ? ` <span class="pill source">${esc(r.source)}</span>` : ""}${r.reviewer_name ? ` <span class="reviewer">${esc(r.reviewer_name)}</span>` : ""}</div><div class="excerpt${r.text ? "" : " empty"}">${text}</div></div>
+    <div class="when">${when}</div>
+  </button>${resolveBtn}${quick}</div>`;
+}
+
+/* ---------- Detail ---------- */
+
+async function openDetail(id, escalate = false) {
+  state.selected = id;
+  document.querySelectorAll(".row").forEach((b) => b.setAttribute("aria-current", String(b.dataset.id === id)));
+  const d = $("#detail");
+  d.hidden = false;
+  document.querySelector(".shell").classList.add("with-detail");
+  d.innerHTML = `<p class="meta">Loading\u2026</p>`;
+  try {
+    const data = await api(`/api/reviews/${encodeURIComponent(id)}`);
+    renderDetail(data);
+    if (escalate) {
+      if (data.escalation && data.escalation.ready && data.escalation.teams) renderEscalate(data);
+      else toast("Escalation isn't set up yet. See Settings.", true);
+    }
+  } catch (e) {
+    d.innerHTML = `<button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button><p>${esc(e.message)}</p>`;
+  }
+}
+
+function closeDetail() {
+  state.selected = null;
+  $("#detail").hidden = true;
+  document.querySelector(".shell").classList.remove("with-detail");
+  document.querySelectorAll(".row").forEach((b) => b.setAttribute("aria-current", "false"));
+}
+window.closeDetail = closeDetail;
+
+function renderDetail(data) {
+  state.detail = data;
+  const { review: r, events, escalation } = data;
+  const canAct = state.me.role === "admin" || state.me.role === "manager"; // escalate and resolve
+  const canReply = !!state.me.canReply;                                    // approve, edit, redraft, dismiss
+  const linkOnly = state.me.role === "link";
+  const answered = ANSWERED.includes(r.status);
+  const live = state.me.mode === "live";
+  let flags = [];
+  try { flags = JSON.parse(r.risk_flags || "[]"); } catch { /* ignore */ }
+
+  // Pasted-in reviews from sites we can't post to; DealerRater and Cars.com post through their API
+  const viaApi = /^(dr|cars)\//.test(r.id);
+  const outside = r.source && !viaApi ? r.source : "";
+  let replyBlock = "";
+  if (r.status === "removed") {
+    replyBlock = `<p class="reason removed-note"><b>${/^Marked removed by hand/.test(r.route_reason || "") ? esc(r.route_reason) + "." : "No longer on Google."}</b>
+      It can't be replied to, and it's left out of the Inbox, Statistics and staff tallies.${/^Marked removed by hand/.test(r.route_reason || "") ? " It stays removed even if Google's system still lists it." : ""}</p>`;
+  } else if (outside && r.status === "external_done") {
+    replyBlock = `<label class="lbl">Response posted on ${esc(outside)}</label><div class="posted-reply">${esc(r.reply_text || r.draft || "(no text saved)")}</div>
+      <p class="meta">${r.decided_by ? "Marked responded by " + esc(r.decided_by) + ", " : ""}${r.reply_time ? ago(r.reply_time) : ""}</p>
+      ${canReply ? `<div class="actions"><button class="btn" data-act="reopen">Mark as not responded</button></div>` : ""}`;
+  } else if (outside && r.status !== "dismissed") {
+    replyBlock = `<label class="lbl" for="replyText">Response to post on ${esc(outside)}</label>
+      <textarea id="replyText" ${canReply ? "" : "readonly"} placeholder="${canReply ? "Click Draft a response, or write one here." : ""}">${esc(r.draft || "")}</textarea>
+      ${!canReply ? `<p class="meta">Only ${esc(approverNames())} can write or change responses.</p>` : `<div class="actions">
+        <button class="btn primary" data-act="redraft">${r.draft ? "Redraft" : "Draft a response"}</button>
+        <button class="btn" id="copyReply" type="button">Copy</button>
+        <button class="btn" data-act="save">Save edits</button>
+        <button class="btn" data-act="responded">Mark as responded</button>
+        <button class="btn quiet danger" data-act="dismiss">Dismiss</button>
+      </div>
+      ${r.draft ? thumbsHtml(data.feedback) : ""}
+      <p class="meta">This review is on ${esc(outside)}, so the response isn't posted from here. Copy it, post it on ${esc(outside)}${r.source_url ? ` (<a href="${esc(r.source_url)}" target="_blank" rel="noopener">open the review</a>)` : ""}, then click Mark as responded.</p>`}`;
+  } else if (answered) {
+    replyBlock = `<label class="lbl">Posted reply</label><div class="posted-reply">${esc(r.reply_text || "")}</div>
+      <p class="meta">${r.reply_time ? "Replied " + ago(r.reply_time) : ""}</p>`;
+  } else if (r.status === "dismissed") {
+    replyBlock = `<p class="reason">Dismissed${r.decided_by ? " by <b>" + esc(r.decided_by) + "</b>" : ""}. No reply will be posted from here.</p>
+      ${canReply ? `<div class="actions"><button class="btn" data-act="reopen">Move back to inbox</button></div>` : ""}`;
+  } else if (!r.draft && (r.status === "new" || r.status === "old_unanswered")) {
+    replyBlock = `<p class="reason">${r.status === "new" ? "A draft will be written on the next agent run." : "This review is older than the drafting window, so no draft was written."}</p>
+      ${canReply ? `<div class="actions"><button class="btn primary" data-act="redraft">Write a draft now</button></div>` : ""}`;
+  } else {
+    const onSite = viaApi ? ` on ${r.source}` : "";
+    const approveLabel = live && !r.is_sample ? (r.reply_text ? `Approve and replace reply${onSite}` : `Approve and post${viaApi ? " to " + r.source : ""}`) : "Approve";
+    const current = r.reply_text && r.reviewer_updated_at ? `<div class="current-reply"><span>Our current reply on ${esc(r.source || "Google")} (approving replaces it)</span>${esc(r.reply_text)}</div>` : "";
+    replyBlock = `${current}<label class="lbl" for="replyText">${r.reply_text && r.reviewer_updated_at ? "New reply" : "Reply"}</label>
+      <textarea id="replyText" ${canReply ? "" : "readonly"}>${esc(r.draft || "")}</textarea>
+      ${!canReply ? `<p class="meta">Only ${esc(approverNames())} can approve or change replies.</p>` : ""}
+      ${canReply ? `<div class="actions">
+        <button class="btn primary" data-act="approve">${approveLabel}</button>
+        <button class="btn" data-act="save">Save edits</button>
+        <button class="btn" data-act="redraft">Redraft</button>
+        <button class="btn quiet danger" data-act="dismiss">Dismiss</button>
+      </div>${r.draft ? thumbsHtml(data.feedback) : ""}` : ""}
+      ${!live && canReply ? `<p class="meta">The agent isn't live yet, so approved replies are saved and will post once it goes live.</p>` : ""}`;
+  }
+
+  if (linkOnly && !answered) replyBlock = "";
+  const reason = r.route_reason
+    ? `<p class="reason"><b>Why it's here:</b> ${esc(r.route_reason)}${flags.length && !r.route_reason.includes(flags[0]) ? ". " + esc(flags.join(", ")) : ""}</p>` : "";
+
+  $("#detail").innerHTML = `
+    <div class="detail-head">
+      <div><h2>${esc(storeName(r.rooftop_key))}</h2><p class="meta">${r.reviewer_name ? `<b class="reviewer-name">${esc(r.reviewer_name)}</b>, ` : ""}${outside ? new Date(r.create_time).toLocaleDateString(undefined, { timeZone: "America/New_York", dateStyle: "medium" }) : new Date(r.create_time).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</p>
+        ${r.source ? `<p class="meta"><span class="pill source">${esc(r.source)}</span>${r.source_url ? ` <a href="${esc(r.source_url)}" target="_blank" rel="noopener">View on ${esc(r.source)}</a>` : ""}</p>` : ""}</div>
+      <div class="head-actions">
+        ${canAct && escalation && escalation.ready && escalation.teams ? `<button class="btn escalate" id="escalateBtn">${r.escalation_open ? "Follow up" : "Escalate"}</button>` : ""}
+        ${linkOnly ? "" : `<button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button>`}
+      </div>
+    </div>
+    ${data.reassign ? `<div class="reassign">
+      <span>Posted on the <b>${esc(data.reassign.listing || "Auto Group")}</b> listing.${data.reassign.moved ? ` Tracked under <b>${esc(storeName(r.rooftop_key))}</b>.` : ""}</span>
+      <label class="sr" for="reassignStore">Track under store</label>
+      <select id="reassignStore"><option value="">${data.reassign.moved ? "Move back to Auto Group" : "Track under a store\u2026"}</option>
+        ${state.me.rooftops.filter((x) => !["other", "group"].includes(x.key)).map((x) => `<option value="${esc(x.key)}" ${data.reassign.moved && x.key === r.rooftop_key ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
+      <button class="btn" id="reassignBtn">${data.reassign.moved ? "Update" : "Move"}</button></div>` : ""}
+    <div>${stars(r.stars, "big-stars")}</div>
+    ${linkOnly ? "" : `<div class="status-row">${pill(r.status, r.is_sample)}${r.id.startsWith("accounts/") && (state.me.role === "admin" || state.me.canReply)
+      ? ` <button class="btn quiet" id="verifyBtn" title="Ask Google whether this review still exists">Check on Google</button>
+          ${r.status === "removed" ? `<button class="btn quiet" data-act="unremove">Undo removed</button>`
+            : `<button class="btn quiet" data-act="markremoved" title="Use when the review is gone from the Google profile but Google hasn't caught up">Mark as removed</button>`}` : ""}</div>`}
+    ${r.reviewer_updated_at && r.status !== "removed" ? `<div class="updated-box"><b>Updated by the reviewer ${whenLabel(r.reviewer_updated_at)}.</b>
+      ${r.prev_stars ? ` Was ${stars(r.prev_stars)}, now ${stars(r.stars)}.` : ""}
+      ${r.prev_text !== null && r.prev_text !== undefined ? `<details><summary>What it said before</summary><p>${r.prev_text ? esc(r.prev_text) : "<em>Rating only</em>"}</p></details>` : ""}</div>` : ""}
+    <blockquote>${r.text ? esc(r.text) : "<em>Rating only, no written review</em>"}</blockquote>
+    ${reason}
+    ${replyBlock}
+    ${escalationBlock(r, escalation, canAct)}
+    ${notesBlock(r, data.notes, data.canNote, canReply)}
+    ${linkOnly ? "" : staffBlock(data.staff)}
+    <div class="history"><h3>History</h3>
+      ${events.length ? `<ol>${events.map((e) => `<li><b>${esc(eventLabel(e.action))}</b> by ${esc(e.actor)}, ${ago(e.at)}${e.detail ? ". " + esc(e.detail) : ""}</li>`).join("")}</ol>` : `<p class="meta">No actions yet.</p>`}
+    </div>
+    ${outside && canAct ? `<div class="actions" style="margin-top:14px"><button class="btn quiet danger" id="deleteManual">Delete this review (added by hand)</button></div>` : ""}`;
+
+  $("#detail").querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => act(r.id, b.dataset.act, b)));
+  bindStaffBlock(r, data.staff);
+  bindNotes(r);
+  bindThumbs(r);
+  if ($("#verifyBtn")) $("#verifyBtn").onclick = async (e) => {
+    e.target.disabled = true; e.target.textContent = "Checking\u2026";
+    try {
+      const d = await api(`/api/reviews/${encodeURIComponent(r.id)}/verify`, { method: "POST" });
+      renderDetail(d); toast(d.checked);
+      const i = state.rows.findIndex((x) => x.id === r.id); if (i >= 0) { state.rows[i] = d.review; renderList(false); }
+      refreshCounts();
+    } catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = "Check on Google"; }
+  };
+  if ($("#reassignBtn")) $("#reassignBtn").onclick = async (e) => {
+    const target = $("#reassignStore").value;
+    if (!target && !data.reassign.moved) return toast("Pick a store first.", true);
+    e.target.disabled = true;
+    try {
+      const d = await api(`/api/reviews/${encodeURIComponent(r.id)}/reassign`, { method: "POST", body: { rooftop: target } });
+      renderDetail(d); toast(target ? `Now tracked under ${storeName(target)}` : "Moved back to Auto Group");
+      const i = state.rows.findIndex((x) => x.id === r.id); if (i >= 0) { state.rows[i] = d.review; renderList(false); }
+      refreshCounts();
+    } catch (err) { toast(err.message, true); e.target.disabled = false; }
+  };
+  if ($("#copyReply")) $("#copyReply").onclick = async () => {
+    try { await navigator.clipboard.writeText($("#replyText").value); toast("Copied. Paste it on " + outside + "."); }
+    catch { $("#replyText").select(); toast("Press Ctrl+C to copy", true); }
+  };
+  if ($("#deleteManual")) $("#deleteManual").onclick = async () => {
+    if (!confirm("Delete this review? It and its escalation records, notes and history are removed from the dashboard. Emails already sent aren't affected.")) return;
+    try {
+      await api(`/api/reviews/${encodeURIComponent(r.id)}/deletemanual`, { method: "POST" });
+      toast("Deleted"); closeDetail(); state.rows = state.rows.filter((x) => x.id !== r.id); renderList(false); refreshCounts();
+    } catch (err) { toast(err.message, true); }
+  };
+  const escBtn = $("#escalateBtn");
+  if (escBtn) escBtn.onclick = () => renderEscalate(state.detail);
+}
+
+function eventLabel(a) {
+  return { drafted: "Drafted", edited: "Edited", approved: "Approved", posted: "Posted", dismissed: "Dismissed", reopened: "Reopened",
+    escalated: "Emailed the team", escalation_resolved: "Marked resolved", staff_tagged: "Staff tag",
+    thumbs_up: "\ud83d\udc4d Thumbs up", thumbs_down: "\ud83d\udc4e Thumbs down",
+    added: "Added", responded: "Marked responded", note_added: "Added a note", note_removed: "Removed a note",
+    removed: "Removed from Google", restored: "Back on Google", review_updated: "Updated by the reviewer", reassigned: "Moved", rating_changed: "Rating changed" }[a] || a;
+}
+
+async function act(id, action, btn) {
+  const body = {};
+  const ta = $("#replyText");
+  if (ta) body.reply = ta.value;
+  if (action === "resolve") {
+    const pick = await askOutcome();
+    if (!pick) return;
+    Object.assign(body, pick);
+  }
+  if (action === "markremoved" && !confirm("Mark this review as removed from Google? It leaves the Inbox, Statistics and staff tallies, and stays removed even if Google's system still lists it. You can undo this.")) return;
+  if (action === "dismiss") {
+    const note = prompt("Dismiss this review? It won't get a reply from here. Add a note (optional):", "");
+    if (note === null) return;
+    body.note = note;
+  }
+  const buttons = $("#detail").querySelectorAll("[data-act]");
+  buttons.forEach((b) => (b.disabled = true));
+  const old = btn.textContent;
+  if (action === "redraft") btn.textContent = "Writing\u2026";
+  try {
+    const data = await api(`/api/reviews/${encodeURIComponent(id)}/${action}`, { method: "POST", body });
+    renderDetail(data);
+    const r = data.review;
+    toast({ approve: r.status === "approved_posted" ? "Reply posted to Google" : "Reply approved", save: "Edits saved", redraft: "New draft written", dismiss: "Review dismissed", reopen: "Moved back to inbox", resolve: "Escalation marked resolved", responded: "Marked as responded", markremoved: "Marked as removed", unremove: "Removed mark undone" }[action]);
+    const i = state.rows.findIndex((x) => x.id === id);
+    if (i >= 0) state.rows[i] = r;
+    const replied = (action === "approve" && r.status === "approved_posted") || (action === "responded" && r.status === "external_done");
+    if (replied && (r.escalation_open || 0) > 0) {
+      const pick = await askOutcome({ title: "Reply posted. Mark the escalation resolved?", cancel: "Not yet" });
+      if (pick) {
+        try {
+          const d2 = await api(`/api/reviews/${encodeURIComponent(id)}/resolve`, { method: "POST", body: pick });
+          renderDetail(d2); if (i >= 0) state.rows[i] = d2.review; toast("Escalation marked resolved");
+        } catch (err) { toast(err.message, true); }
+      }
+    }
+    if (state.view === "inbox") state.rows = state.rows.filter((x) => OPEN_STATUSES.includes(x.status));
+    if (state.view === "escalations") state.rows = state.rows.filter((x) => (x.escalation_open || 0) > 0);
+    renderList(false);
+    refreshCounts();
+  } catch (e) {
+    toast(e.message, true);
+    buttons.forEach((b) => (b.disabled = false));
+    btn.textContent = old;
+  }
+}
+
+/* ---------- Daily reminder: escalations with no follow-up in a week ---------- */
+
+async function checkStaleEscalations(force = false) {
+  const key = `stale-reminder:${state.me.email}`;
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  try { if (!force && localStorage.getItem(key) === today) return; } catch { /* storage off: show it */ }
+  let d;
+  try { d = await api("/api/escalations/stale"); } catch { return; }
+  state.staleDays = d.days;
+  if (!d.reviews.length) return;
+  try { localStorage.setItem(key, today); } catch { /* */ }
+  const daysSince = (t) => Math.max(d.days, Math.floor((Date.now() - Date.parse(t)) / 86400_000));
+  const summary = (r) => `<div class="stale-review"><div><b>${esc(storeName(r.rooftop_key))}</b>${r.source ? ` <span class="pill source">${esc(r.source)}</span>` : ""}
+      ${stars(r.stars)}${r.reviewer_name ? ` <span class="meta">${esc(r.reviewer_name)}</span>` : ""}</div>
+      ${r.text ? `<div class="stale-text">${esc(r.text)}${r.text.length >= 160 ? "\u2026" : ""}</div>` : ""}</div>`;
+  const one = d.reviews.length === 1 ? d.reviews[0] : null;
+  const dlg = document.createElement("dialog");
+  dlg.className = "outcome-dialog stale-dialog";
+  dlg.innerHTML = one
+    ? `<h3>It's been ${daysSince(one.escalation_last_at)} days since you last followed up on this review. Follow up now?</h3>
+       ${summary(one)}
+       <div class="actions"><button class="btn primary" data-open="${esc(one.id)}">Follow up now</button><button class="btn quiet" data-close>Later</button></div>`
+    : `<h3>${d.reviews.length} escalations haven't had a follow-up in ${d.days}+ days</h3>
+       <ol class="stale-list">${d.reviews.slice(0, 8).map((r) => `<li>${summary(r)}
+         <div class="stale-row"><span class="late">It's been ${daysSince(r.escalation_last_at)} days since the last follow-up.</span>
+         <button class="btn" data-open="${esc(r.id)}">Follow up</button></div></li>`).join("")}</ol>
+       ${d.reviews.length > 8 ? `<p class="meta">And ${d.reviews.length - 8} more.</p>` : ""}
+       <div class="actions"><button class="btn primary" data-all>Take me to escalations needing my attention</button><button class="btn quiet" data-close>Later</button></div>`;
+  document.body.appendChild(dlg);
+  const close = () => { dlg.close(); dlg.remove(); };
+  dlg.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => { close(); openDetail(b.dataset.open, true); }));
+  if (dlg.querySelector("[data-all]")) dlg.querySelector("[data-all]").onclick = () => { close(); state.staleOnly = true; setView("escalations"); };
+  dlg.querySelector("[data-close]").onclick = close;
+  dlg.addEventListener("cancel", () => dlg.remove());
+  dlg.showModal();
+}
+
+/* ---------- Thumbs up / down on drafts ---------- */
+
+function thumbsHtml(feedback) {
+  const last = (feedback || [])[0];
+  return `<div class="thumbs">
+    <span class="meta">How's this draft?</span>
+    <button class="btn thumb" id="thumbUp" title="Good draft: future drafts will use it as an example">\ud83d\udc4d</button>
+    <button class="btn thumb" id="thumbDown" title="Needs work: say what to change and it'll redraft and learn">\ud83d\udc4e</button>
+    ${last ? `<span class="meta">Last: ${last.rating === "up" ? "\ud83d\udc4d" : "\ud83d\udc4e"} by ${esc(last.created_by)}, ${ago(last.created_at)}${last.lesson ? `. Lesson added: \u201c${esc(last.lesson)}\u201d` : ""}</span>` : ""}
+  </div>`;
+}
+
+function askThumbsDown() {
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "outcome-dialog";
+    dlg.innerHTML = `<form method="dialog">
+      <h3>What should change?</h3>
+      <p class="meta">Claude will redraft with this, and if it applies to replies in general, add it as a lesson for every future draft.</p>
+      <textarea name="note" rows="4" required placeholder="For example: too long, and don't apologize twice"></textarea>
+      <div class="actions"><button class="btn primary" value="ok">Redraft</button><button class="btn quiet" value="cancel" formnovalidate>Cancel</button></div>
+    </form>`;
+    document.body.appendChild(dlg);
+    dlg.addEventListener("close", () => {
+      const note = dlg.querySelector("textarea").value.trim();
+      resolve(dlg.returnValue === "ok" && note ? note : null);
+      dlg.remove();
+    });
+    dlg.showModal();
+  });
+}
+
+function bindThumbs(r) {
+  const send = async (rating, note, btn) => {
+    btn.disabled = true;
+    if (rating === "down") btn.textContent = "Redrafting\u2026";
+    try {
+      const d = await api(`/api/reviews/${encodeURIComponent(r.id)}/feedback`, { method: "POST", body: { rating, note } });
+      renderDetail(d);
+      toast(rating === "up" ? "Thanks. Future drafts will use this as an example." : d.lesson ? `Redrafted. Lesson added: \u201c${d.lesson}\u201d` : "Redrafted with your note.");
+    } catch (err) { toast(err.message, true); btn.disabled = false; btn.textContent = rating === "up" ? "\ud83d\udc4d" : "\ud83d\udc4e"; }
+  };
+  if ($("#thumbUp")) $("#thumbUp").onclick = (e) => send("up", "", e.target);
+  if ($("#thumbDown")) $("#thumbDown").onclick = async (e) => { const note = await askThumbsDown(); if (note) send("down", note, e.target); };
+}
+
+/* ---------- Management notes ---------- */
+
+function notesBlock(r, notes, canNote, canReply) {
+  if (notes === null || notes === undefined) return "";
+  if (!notes.length && !canNote) return "";
+  const list = notes.length ? `<ol class="notes">${notes.map((n) => `<li><div class="note-meta"><span>${n.provided_by ? `From <b>${esc(n.provided_by)}</b>, added by ${esc(n.author_name || n.author)}` : `<b>${esc(n.author_name || n.author)}</b>`}, ${ago(n.created_at)}</span>
+      ${n.author === state.me.email || state.me.role === "admin" ? `<button class="btn quiet danger" data-delnote="${n.id}">Remove</button>` : ""}</div>
+      <div class="note-body">${esc(n.body)}</div></li>`).join("")}</ol>` : `<p class="meta">No notes yet.</p>`;
+  return `<div class="esc-block notes-block"><h3>Management notes</h3>
+    <p class="meta">Background from the store team, for writing an accurate reply. Internal only; never posted.</p>
+    ${list}
+    ${canNote ? `<label class="sr" for="noteText">Add a note</label>
+      <textarea id="noteText" rows="4" placeholder="Paste what the manager said, or type background on what happened and what was done."></textarea>
+      <label class="field note-by">Note provided by (first and last name)<input id="noteBy" value="${esc(state.me.name || "")}" placeholder="For example, Jane Smith" autocomplete="off"></label>
+      <div class="actions"><button class="btn" id="addNote">Add note</button>
+      ${canReply && notes.length ? `<button class="btn primary" id="draftNotes">Draft a reply with these notes</button>` : ""}</div>` : ""}
+  </div>`;
+}
+
+function bindNotes(r) {
+  const call = async (action, body, msg, btn) => {
+    if (btn) { btn.disabled = true; if (action === "draftnotes") btn.textContent = "Writing\u2026"; }
+    try { renderDetail(await api(`/api/reviews/${encodeURIComponent(r.id)}/${action}`, { method: "POST", body })); toast(msg); }
+    catch (err) { toast(err.message, true); if (btn) { btn.disabled = false; btn.textContent = action === "draftnotes" ? "Draft a reply with these notes" : btn.textContent; } }
+  };
+  if ($("#addNote")) $("#addNote").onclick = (e) => {
+    const body = $("#noteText").value.trim();
+    if (!body) return toast("Paste or type the note first.", true);
+    const by = $("#noteBy").value.trim();
+    if (!/\S+\s+\S+/.test(by)) return toast("Enter the first and last name of the person who provided this note.", true);
+    call("note", { body, provided_by: by }, "Note added", e.target);
+  };
+  if ($("#draftNotes")) $("#draftNotes").onclick = (e) => call("draftnotes", {}, "New draft written using the notes. Review it before approving.", e.target);
+  $("#detail").querySelectorAll("[data-delnote]").forEach((b) => (b.onclick = () => {
+    if (confirm("Remove this note?")) call("delnote", { note_id: +b.dataset.delnote }, "Note removed", b);
+  }));
+}
+
+/* ---------- Manual escalation (reviews from other sites) ---------- */
+
+function openManualEscalation() {
+  const stores = state.me.rooftops.filter((x) => x.key !== "other");
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const d = $("#detail");
+  d.hidden = false;
+  document.querySelector(".shell").classList.add("with-detail");
+  state.selected = null;
+  d.innerHTML = `
+    <div class="detail-head"><div><h2>Manual escalation</h2><p class="meta">A review from another site, step 1 of 2</p></div>
+      <button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button></div>
+    <label class="field">Store<select id="mStore"><option value="">Pick a store\u2026</option>${stores.map((x) => `<option value="${esc(x.key)}" ${state.rooftop === x.key ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
+    <label class="field">Where was it posted?<select id="mSource"><option value="">Pick a site\u2026</option>${(state.me.sources || []).map((x) => `<option>${esc(x)}</option>`).join("")}<option>Other</option></select></label>
+    <label class="field" id="mOtherWrap" hidden>Site name<input id="mOther" placeholder="For example, Nextdoor"></label>
+    <div class="esc-fields">
+      <label class="field">Star rating<select id="mStars"><option value="0">No rating</option>${[5, 4, 3, 2, 1].map((n) => `<option value="${n}">${n} star${n === 1 ? "" : "s"}</option>`).join("")}</select></label>
+      <label class="field">Date posted<input type="date" id="mDate" value="${today}" max="${today}"></label>
+    </div>
+    <label class="field">Reviewer name (optional)<input id="mName" autocomplete="off"></label>
+    <label class="field">Link to the review (optional)<input id="mUrl" type="url" placeholder="https://"></label>
+    <label class="field">Full review<textarea id="mText" rows="8" placeholder="Paste the whole review here"></textarea></label>
+    <div class="actions"><button class="btn primary" id="mNext">Next: escalation details</button><button class="btn quiet" onclick="closeDetail()">Cancel</button></div>
+    <p class="meta">It's added to that store's reviews, then you fill in the escalation email like any other escalation.</p>`;
+  $("#mSource").onchange = () => { $("#mOtherWrap").hidden = $("#mSource").value !== "Other"; };
+  $("#mNext").onclick = async (e) => {
+    const body = { rooftop: $("#mStore").value, source: $("#mSource").value, source_other: $("#mOther").value, stars: $("#mStars").value,
+      date: $("#mDate").value, reviewer_name: $("#mName").value, url: $("#mUrl").value, text: $("#mText").value };
+    if (!body.rooftop) return toast("Pick a store.", true);
+    if (!body.source || (body.source === "Other" && !body.source_other.trim())) return toast("Pick where the review was posted.", true);
+    if (!body.text.trim()) return toast("Paste the review text.", true);
+    e.target.disabled = true;
+    try {
+      const { id } = await api("/api/reviews", { method: "POST", body });
+      refreshCounts();
+      await openDetail(id, true);
+    } catch (err) { toast(err.message, true); e.target.disabled = false; }
+  };
+}
+
+/* ---------- Escalations ---------- */
+
+const OUTCOME_LABELS = { contacted: "Customer contacted", fixed: "Issue resolved", updated: "Customer updated the review",
+  removed: "Customer removed the review", unreachable: "Couldn't reach the customer", other: "Other" };
+
+/** Asks what happened when an escalation is resolved. Resolves to { outcome, note } or null if cancelled. */
+function askOutcome(opts = {}) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "outcome-dialog";
+    dlg.innerHTML = `<form method="dialog">
+      <h3>${esc(opts.title || "What happened?")}</h3>${opts.title ? `<p class="meta" style="margin-top:-4px">What happened?</p>` : ""}
+      <div class="outcome-list">${Object.entries(OUTCOME_LABELS).map(([k, v], i) =>
+        `<label><input type="radio" name="outcome" value="${k}" ${i === 0 ? "required" : ""}> ${esc(v)}</label>`).join("")}</div>
+      <label class="field">Note (optional)<textarea name="note" rows="3" placeholder="For example: GM called 10/27, offered a free detail"></textarea></label>
+      <div class="actions"><button class="btn primary" value="ok">Mark resolved</button><button class="btn quiet" value="cancel" formnovalidate>${esc(opts.cancel || "Cancel")}</button></div>
+    </form>`;
+    document.body.appendChild(dlg);
+    dlg.addEventListener("close", () => {
+      const f = dlg.querySelector("form");
+      const outcome = f.outcome.value;
+      resolve(dlg.returnValue === "ok" && outcome ? { outcome, note: f.note.value } : null);
+      dlg.remove();
+    });
+    dlg.showModal();
+  });
+}
+
+async function resolveFromList(id, btn) {
+  const pick = await askOutcome();
+  if (!pick) return;
+  btn.disabled = true;
+  try {
+    await api(`/api/reviews/${encodeURIComponent(id)}/resolve`, { method: "POST", body: pick });
+    state.rows = state.rows.filter((x) => x.id !== id);
+    if (state.selected === id) closeDetail();
+    renderList(false);
+    refreshCounts();
+    toast("Marked resolved and removed from Escalations");
+  } catch (err) { toast(err.message, true); btn.disabled = false; }
+}
+
+function approverNames() {
+  const a = (state.me.approvers || []).map((x) => x.split("@")[0]);
+  return a.length ? a.join(" and ") : "the reply approvers";
+}
+
+const DETAIL_LABELS = { details: "Other details", dms: "Client / DMS #", client: "Client name", salesperson: "Salesperson", deal: "Deal #", dealDate: "Deal date",
+  ro: "RO #", roDate: "RO date", advisor: "Service advisor" };
+
+function lastEscalationHtml(e) {
+  const last = e && e.last;
+  if (!last) return "";
+  const fields = Object.entries(last.fields || {});
+  return `<div class="esc-details">
+    <p class="lbl">${esc((e.labels && e.labels[last.concern]) || "Concern")}</p>
+    ${last.unknown ? `<p class="meta" style="margin:0 0 4px">We have been unable to find the customer associated with this review.${fields.length ? " Here is the information we have:" : ""}</p>` : ""}
+    ${fields.length && !last.unknown ? `<p class="meta" style="margin:0 0 4px">We believe the customer that left the review is:</p>` : ""}
+    ${fields.length ? `
+      <dl>${fields.map(([k, v]) => `<dt>${esc(DETAIL_LABELS[k] || k)}</dt><dd>${esc(/Date$/.test(k) && /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(v + "T12:00:00Z").toLocaleDateString(undefined, { timeZone: "UTC", dateStyle: "medium" }) : v)}</dd>`).join("")}</dl>` : ""}
+    ${last.note ? `<div class="last-note"><span>Last note sent</span>${esc(last.note)}</div>` : ""}
+  </div>`;
+}
+
+function sentListHtml(e) {
+  if (!e || !e.sent || !e.sent.length) return "";
+  return `<ol class="sent-list">${e.sent.map((x) => `<li><b>${esc((e.labels && e.labels[x.concern]) || x.concern)}</b> by ${esc(x.sent_by)}, ${ago(x.sent_at)}
+    <span class="meta">to ${esc(x.recipients.split(",").join(", "))}</span></li>`).join("")}</ol>`;
+}
+
+function escalationBlock(r, e, canAct) {
+  if (!e || !e.ready) return "";
+  const count = r.escalation_count || 0, open = r.escalation_open || 0;
+  const summary = count
+    ? `<p class="esc-summary"><span class="esc-count">${count}</span> ${count === 1 ? "email" : "emails"} sent to the team. Last ${ago(r.escalation_last_at)}.
+       ${open > 1 ? `<b>${open - 1} follow-up${open - 1 === 1 ? "" : "s"} without resolution.</b>` : open === 1 ? "Waiting on the team." : `Resolved${r.escalation_outcome ? ": " + esc(OUTCOME_LABELS[r.escalation_outcome] || r.escalation_outcome) : ""}.`}</p>` : "";
+  const buttons = canAct && open ? `<div class="actions"><button class="btn quiet" data-act="resolve">Mark resolved</button></div>` : "";
+  if (!summary && !buttons) return "";
+  return `<div class="esc-block"><h3>Escalation</h3>${summary}${lastEscalationHtml(e)}${sentListHtml(e)}${buttons}</div>`;
+}
+
+const FIELD_INPUTS = {
+  dms: ["Client / DMS #", "text"], client: ["Client name", "text"],
+  salesperson: ["Salesperson", "text"], deal: ["Deal #", "text"], dealDate: ["Deal date", "date"],
+  ro: ["RO #", "text"], roDate: ["RO date", "date"], advisor: ["Service advisor", "text"],
+};
+
+function renderEscalate(data) {
+  const { review: r, escalation: e } = data;
+  const guess = r.department === "sales" ? "sales" : r.department === "service" ? "service" : "";
+  const last = e.last;
+  const f = { concern: last ? last.concern : guess, fields: last ? { ...last.fields } : {}, note: "", wholeStore: false, extras: [], removed: new Set(), unknown: !!(last && last.unknown) };
+  const d = $("#detail");
+
+  const base = () => {
+    if (!f.concern) return [];
+    const teams = f.wholeStore ? ["store"] : e.teamsFor[f.concern];
+    return [...new Set(teams.flatMap((t) => e.teams[t] || []))];
+  };
+  const recipients = () => [...new Set([...base(), ...f.extras])].filter((a) => !f.removed.has(a));
+
+  // Follow-ups start with the same people as last time: anyone added then is
+  // added again, and anyone removed from the team list stays removed.
+  if (last) {
+    const before = base();
+    f.extras = last.recipients.filter((a) => !before.includes(a));
+    before.filter((a) => !last.recipients.includes(a)).forEach((a) => f.removed.add(a));
+  }
+
+  const draw = () => {
+    const fieldsHtml = f.concern ? e.fieldsFor[f.concern].map((k) => {
+      const [label, type] = FIELD_INPUTS[k];
+      return `<label class="field">${label}<input type="${type}" data-field="${k}" value="${esc(f.fields[k] || "")}" autocomplete="off"></label>`;
+    }).join("") : "";
+    const list = recipients();
+    const emptyTeams = f.concern && !base().length;
+    const teamNames = f.wholeStore ? "entire store" : (e.teamsFor[f.concern] || []).join(" and ");
+    d.innerHTML = `
+      <div class="detail-head"><div><h2>Escalate to the team</h2><p class="meta">${esc(storeName(r.rooftop_key))}, ${r.stars || "no"} star review</p></div>
+        <button class="close" aria-label="Back to review" id="escBack">\u00d7</button></div>
+      ${!e.mailReady ? `<p class="late">Email sending isn't set up yet, so you can preview but not send. See the README.</p>`
+        : !e.canSend ? `<p class="late">Before you can send, <a href="/auth/logout">sign out</a> and sign back in once so Microsoft lets this app send from your mailbox. You can still fill this out and preview.</p>` : ""}
+      ${(r.escalation_open || 0) > 0 ? `<p class="note">This will be follow-up #${r.escalation_open} on this review.</p>` : ""}
+      <fieldset class="field concern"><legend>What is this about?</legend>
+        ${["sales", "service", "both", "other"].map((c) => `<label><input type="radio" name="concern" value="${c}" ${f.concern === c ? "checked" : ""}> ${{ sales: "Sales", service: "Service", both: "Both", other: "Other" }[c]}</label>`).join("")}
+      </fieldset>
+      ${f.concern ? `
+        <label class="check unknown-check"><input type="checkbox" id="escUnknown" ${f.unknown ? "checked" : ""}> We don't know who left this</label>
+        ${f.unknown ? `<p class="note unknown-note">The email will say: "We have been unable to find the customer associated with this review. Here is the information we have:" followed by whatever you fill in below. Leave anything blank that you don't know.</p>` : ""}
+        <div class="esc-fields">${fieldsHtml}</div>
+        ${f.unknown ? `<label class="field">Other details we have<textarea data-field="details" rows="3" placeholder="Anything that might help: vehicle, approximate visit date, phone or email on the review profile, what the review mentions">${esc(f.fields.details || "")}</textarea></label>` : ""}
+        <p class="note">${last ? "Filled in from the last escalation on this review. Change anything that's different." : f.unknown ? "" : "Customer details are optional. If you add any, the email opens with \"We believe the customer that left the review is:\"."} They're saved with this review so follow-ups start filled in.</p>
+        ${last && last.note ? `<div class="last-note"><span>Last note sent</span>${esc(last.note)}</div>` : ""}
+        <label class="field">${last ? "Note for this follow-up" : "Note"}<textarea id="escNote" rows="5" placeholder="${last ? "What's changed, or what's still needed?" : "What should the team do?"}">${esc(f.note)}</textarea></label>
+        <div class="field"><span>Send to</span>
+          <label class="check"><input type="checkbox" id="wholeStore" ${f.wholeStore ? "checked" : ""}> Send to the entire store instead</label>
+          ${emptyTeams ? `<p class="late">No ${teamNames} list for this store yet. Add one in Settings, or add people below.</p>` : ""}
+          <div class="chips">${list.map((a) => `<span class="chip">${esc(a)}<button type="button" aria-label="Remove ${esc(a)}" data-remove="${esc(a)}">\u00d7</button></span>`).join("") || `<span class="meta">Nobody yet</span>`}</div>
+          <div class="add-row"><input type="email" id="addEmail" placeholder="Add someone (name@${esc(e.domains[0] || "lesterglenn.com")})"><button class="btn" id="addBtn" type="button">Add</button></div>
+          <p class="meta">People added here are for this email only. It sends from your own mailbox, so replies come to you and a copy lands in your Sent Items.</p>
+        </div>
+        <div class="actions"><button class="btn primary" id="previewBtn">Preview email</button><button class="btn quiet" id="cancelEsc">Cancel</button></div>` : ""}`;
+
+    $("#escBack").onclick = () => renderDetail(state.detail);
+    d.querySelectorAll('input[name="concern"]').forEach((i) => (i.onchange = () => { save(); f.concern = i.value; f.removed.clear(); draw(); }));
+    if ($("#escUnknown")) $("#escUnknown").onchange = (ev) => { save(); f.unknown = ev.target.checked; draw(); };
+    if (!f.concern) return;
+    $("#cancelEsc").onclick = () => renderDetail(state.detail);
+    $("#wholeStore").onchange = (ev) => { save(); f.wholeStore = ev.target.checked; draw(); };
+    d.querySelectorAll("[data-remove]").forEach((b) => (b.onclick = () => { save(); f.removed.add(b.dataset.remove); f.extras = f.extras.filter((x) => x !== b.dataset.remove); draw(); }));
+    const add = () => {
+      const v = $("#addEmail").value.trim().toLowerCase();
+      if (!v) return;
+      const dom = v.split("@")[1];
+      if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(v) || !e.domains.includes(dom)) { toast(`Only ${e.domains.join(", ")} addresses can be added.`, true); return; }
+      save(); f.removed.delete(v); if (!f.extras.includes(v)) f.extras.push(v); draw(); $("#addEmail").focus();
+    };
+    $("#addBtn").onclick = add;
+    $("#addEmail").onkeydown = (ev) => { if (ev.key === "Enter") { ev.preventDefault(); add(); } };
+    $("#previewBtn").onclick = async (ev) => {
+      save();
+      ev.target.disabled = true;
+      try {
+        const p = await api(`/api/reviews/${encodeURIComponent(r.id)}/escalate`, { method: "POST", body: payload(true) });
+        preview(p);
+      } catch (err) { toast(err.message, true); ev.target.disabled = false; }
+    };
+  };
+
+  const save = () => {
+    d.querySelectorAll("[data-field]").forEach((i) => (f.fields[i.dataset.field] = i.value));
+    if ($("#escNote")) f.note = $("#escNote").value;
+  };
+  const payload = (isPreview) => ({ concern: f.concern, fields: f.fields, note: f.note, recipients: recipients(), unknown: f.unknown, preview: isPreview });
+
+  const preview = (p) => {
+    d.innerHTML = `
+      <div class="detail-head"><div><h2>Check and send</h2><p class="meta">From you (${esc(p.from)}) to ${p.recipients.length} ${p.recipients.length === 1 ? "person" : "people"}</p></div>
+        <button class="close" aria-label="Back to review" id="escBack">\u00d7</button></div>
+      <p class="meta"><b>To:</b> ${p.recipients.map(esc).join(", ")}</p>
+      <p class="meta"><b>Subject:</b> ${esc(p.subject)}</p>
+      <iframe class="email-preview" sandbox="" title="Email preview"></iframe>
+      <div class="actions"><button class="btn primary" id="sendBtn" ${e.mailReady ? "" : "disabled"}>Send email</button><button class="btn" id="editBtn">Edit</button></div>
+      <div id="signInAgain"></div>`;
+    d.querySelector(".email-preview").srcdoc = p.html;
+    $("#escBack").onclick = () => renderDetail(state.detail);
+    $("#editBtn").onclick = draw;
+    $("#sendBtn").onclick = async (ev) => {
+      ev.target.disabled = true; ev.target.textContent = "Sending\u2026";
+      try {
+        const data2 = await api(`/api/reviews/${encodeURIComponent(r.id)}/escalate`, { method: "POST", body: payload(false) });
+        renderDetail(data2);
+        const i = state.rows.findIndex((x) => x.id === r.id);
+        if (i >= 0) { state.rows[i] = data2.review; renderList(false); }
+        toast("Email sent to the team");
+        refreshCounts();
+      } catch (err) {
+        ev.target.disabled = false; ev.target.textContent = "Send email";
+        if (err.data && err.data.signIn) {
+          $("#signInAgain").innerHTML = `<p class="late" style="margin-top:12px">${esc(err.message)} Copy your note first, since signing out clears this form.</p>
+            <a class="btn" href="/auth/logout">Sign out</a>`;
+        } else toast(err.message, true);
+      }
+    };
+  };
+
+  draw();
+}
+
+/* ---------- Staff mentioned (review panel) ---------- */
+
+const ROLE_LABEL = { sales: "Sales", service: "Service", other: "Other" };
+
+function staffBlock(st) {
+  if (!st) return "";
+  const rosterOpts = (selected) => st.roster.filter((p) => p.active).map((p) =>
+    `<option value="${p.id}" ${p.id === selected ? "selected" : ""}>${esc(p.full_name)} (${ROLE_LABEL[p.role]})</option>`).join("");
+  const items = st.mentions.filter((m) => m.match !== "ignored").map((m) => {
+    const who = m.staff_id ? `<b>${esc(m.full_name)}</b>` : m.match === "ambiguous" ? `<span class="late">more than one match</span>` : `<span class="late">not on the roster</span>`;
+    const said = m.match === "manual" && m.full_name === m.name_raw ? "Tagged" : `"${esc(m.name_raw)}"`;
+    const how = m.match === "manual" ? "tagged by hand" : m.match === "auto" ? "matched automatically" : "";
+    return `<li><span>${said} \u2192 ${who}${how ? ` <span class="meta">${how}</span>` : ""}</span>
+      ${st.canTag ? `<span class="tag-ctl"><select data-assign="${m.id}" aria-label="Who is ${esc(m.name_raw)}?"><option value="">${m.staff_id ? "Change person\u2026" : "Pick the person\u2026"}</option>${rosterOpts(m.staff_id)}</select>
+        ${m.match === "manual" ? `<button class="btn quiet" data-untag="${m.id}">Remove</button>` : `<button class="btn quiet" data-ignore="${m.id}">Not an employee</button>`}</span>` : ""}</li>`;
+  }).join("");
+  const body = !st.scanned && !st.mentions.length ? `<p class="meta">Not read for staff names yet. It happens on the next agent run, or from the Staff tab.</p>`
+    : items ? `<ul class="staff-list">${items}</ul>` : `<p class="meta">No employees named in this review.</p>`;
+  const add = st.canTag ? `<div class="tag-add">
+      <select id="addStaff" aria-label="Tag an employee">
+        <option value="">${st.mentions.some((m) => m.match !== "ignored") ? "Tag another employee\u2026" : "Tag an employee\u2026"}</option>
+        ${rosterOpts(null)}<option value="new">+ Someone not on the roster\u2026</option></select>
+      <div id="newStaff" class="new-staff" hidden>
+        <input id="newStaffName" placeholder="Full name" autocomplete="off">
+        <select id="newStaffRole"><option value="sales">Sales</option><option value="service">Service</option><option value="other">Other</option></select>
+        <button class="btn primary" id="newStaffAdd">Add and tag</button>
+      </div></div>` : "";
+  return `<div class="esc-block"><h3>Staff mentioned</h3>${body}${add}</div>`;
+}
+
+function bindStaffBlock(r, st) {
+  if (!st || !st.canTag) return;
+  const call = async (body, msg) => {
+    try { await api("/api/staff/tag", { method: "POST", body }); toast(msg); openDetail(r.id); }
+    catch (err) { toast(err.message, true); }
+  };
+  $("#detail").querySelectorAll("[data-assign]").forEach((sel) => (sel.onchange = () => sel.value && call({ op: "assign", mention_id: +sel.dataset.assign, staff_id: +sel.value }, "Tagged")));
+  $("#detail").querySelectorAll("[data-ignore]").forEach((b) => (b.onclick = () => call({ op: "ignore", mention_id: +b.dataset.ignore }, "Marked as not an employee")));
+  $("#detail").querySelectorAll("[data-untag]").forEach((b) => (b.onclick = () => call({ op: "remove", mention_id: +b.dataset.untag }, "Tag removed")));
+  const add = $("#addStaff");
+  if (!add) return;
+  add.onchange = () => {
+    $("#newStaff").hidden = add.value !== "new";
+    if (add.value === "new") return $("#newStaffName").focus();
+    if (add.value) call({ op: "add", review_id: r.id, staff_id: +add.value }, "Tagged");
+  };
+  const addNew = () => {
+    const name = $("#newStaffName").value.trim();
+    if (!name) return toast("Enter their full name.", true);
+    call({ op: "add", review_id: r.id, full_name: name, role: $("#newStaffRole").value }, `Added ${name} to the roster and tagged`);
+  };
+  $("#newStaffAdd").onclick = addNew;
+  $("#newStaffName").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); addNew(); } };
+}
+
+/* ---------- Staff tab ---------- */
+
+function monthOptions(selected) {
+  const out = [];
+  const d = new Date();
+  d.setDate(1);
+  for (let i = 0; i < 36; i++) {
+    const v = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    out.push(`<option value="${v}" ${v === selected ? "selected" : ""}>${d.toLocaleDateString(undefined, { month: "short", year: "numeric" })}</option>`);
+    d.setMonth(d.getMonth() - 1);
+  }
+  return out.join("");
+}
+
+function thisMonth() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; }
+
+async function renderStaff() {
+  closeDetail();
+  const v = $("#view");
+  const f = state.staffFilter || (state.staffFilter = { from: thisMonth(), to: thisMonth(), role: "" });
+  const controls = `<div class="filters" id="staffFilters">
+      <label>From <select id="sFrom">${monthOptions(f.from)}</select></label>
+      <label>To <select id="sTo">${monthOptions(f.to)}</select></label>
+      <label class="sr" for="sRole">Role</label>
+      <select id="sRole"><option value="">Sales and service</option><option value="sales" ${f.role === "sales" ? "selected" : ""}>Sales</option>
+        <option value="service" ${f.role === "service" ? "selected" : ""}>Service</option><option value="other" ${f.role === "other" ? "selected" : ""}>Other</option></select>
+    </div>`;
+  v.innerHTML = controls + `<div class="empty-state">Counting\u2026</div>`;
+  const bind = () => {
+    const apply = () => { f.from = $("#sFrom").value; f.to = $("#sTo").value; f.role = $("#sRole").value; if (f.from > f.to) f.to = f.from; renderStaff(); };
+    ["#sFrom", "#sTo", "#sRole"].forEach((id) => ($(id).onchange = apply));
+  };
+  bind();
+  const q = new URLSearchParams({ from: f.from, to: f.to });
+  if (f.role) q.set("role", f.role);
+  if (state.rooftop) q.set("rooftop", state.rooftop);
+  let t, roster;
+  try { [t, roster] = await Promise.all([api(`/api/staff/tally?${q}`), api(`/api/staff/roster${state.rooftop ? "?rooftop=" + state.rooftop : ""}`)]); }
+  catch (err) { v.innerHTML = controls + `<div class="empty-state"><strong>Staff counts didn't load</strong>${esc(err.message)}</div>`; bind(); return; }
+  if (!t.ready) {
+    v.innerHTML = `<div class="empty-state"><strong>One-time setup needed</strong>Run the SQL in <code>migrations/0006_staff_mentions.sql</code> in the D1 console, then reload.</div>`;
+    return;
+  }
+  const label = f.from === f.to ? new Date(f.from + "-02").toLocaleDateString(undefined, { month: "long", year: "numeric" })
+    : `${new Date(f.from + "-02").toLocaleDateString(undefined, { month: "short", year: "numeric" })} to ${new Date(f.to + "-02").toLocaleDateString(undefined, { month: "short", year: "numeric" })}`;
+  const cov = t.coverage || { total: 0, scanned: 0 };
+  const unread = (cov.total || 0) - (cov.scanned || 0);
+  const coverage = `<div class="panel cov"><div><b>${cov.scanned || 0}</b> of <b>${cov.total || 0}</b> reviews from ${esc(label)} have been read for staff names.
+      ${unread > 0 ? `<span class="late">${unread} not read yet, so counts may be low.</span>` : ""}</div>
+      ${t.canTag && unread > 0 ? `<button class="btn primary" id="scanBtn">Read ${unread} reviews now</button>` : ""}</div>`;
+
+  const rows = t.people.map((p) => `<tr data-person="${p.id}" class="clickable">
+      <td><b>${esc(p.full_name)}</b>${p.active ? "" : ` <span class="meta">(inactive)</span>`}</td>
+      <td>${esc(storeName(p.rooftop_key).replace(/^Lester Glenn /, ""))}</td><td>${ROLE_LABEL[p.role]}</td>
+      <td class="num"><b>${p.reviews}</b></td><td class="num">${p.positive}</td><td class="num">${p.neutral}</td><td class="num ${p.negative ? "late" : ""}">${p.negative}</td>
+      <td class="num">${p.avg_stars ?? "\u2013"}</td></tr>`).join("");
+  const tally = `<div class="panel"><div class="panel-head"><h3>Reviews per person, ${esc(label)}</h3>
+      ${t.people.length ? `<button class="btn" id="csvBtn">Download CSV</button>` : ""}</div>
+    <p class="note">Each review counts once per person it names. Click a name to see the reviews.</p>
+    ${t.people.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Store</th><th>Role</th><th class="num">Reviews</th>
+      <th class="num">4\u20135 \u2605</th><th class="num">3 \u2605</th><th class="num">1\u20132 \u2605</th><th class="num">Avg</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<p class="meta">Nobody tallied yet for this range.${roster.staff.length ? "" : " Add each store's staff below so names can be matched."}</p>`}
+    <div id="drill"></div></div>`;
+
+  const untaggedCount = t.unassigned.reduce((a, u) => a + u.reviews, 0);
+  const untagged = t.unassigned.length ? `<div class="panel"><h3>Needs tagging <span class="tab-count">${untaggedCount}</span></h3>
+      <p class="note">Names Claude found that don't match exactly one person on that store's roster. These aren't counted until they're tagged.</p>
+      <div class="table-wrap"><table><thead><tr><th>Name in reviews</th><th>Store</th><th>Why</th><th class="num">Reviews</th></tr></thead><tbody>
+      ${t.unassigned.map((u) => `<tr><td>"${esc(u.name)}"</td><td>${esc(storeName(u.rooftop_key).replace(/^Lester Glenn /, ""))}</td>
+        <td>${u.match === "ambiguous" ? "More than one person matches" : "Not on the roster"}</td><td class="num">${u.reviews}</td></tr>`).join("")}</tbody></table></div>
+      ${t.canTag ? `<button class="btn primary" id="tagBtn" style="margin-top:12px">Tag these now</button><div id="tagList"></div>` : ""}</div>` : "";
+
+  v.innerHTML = controls + coverage + tally + untagged + (t.canTag ? rosterPanel(roster.staff) : "");
+  bind();
+  if ($("#scanBtn")) $("#scanBtn").onclick = (e) => scanMonths(f, e.target);
+  if ($("#csvBtn")) $("#csvBtn").onclick = () => downloadCsv(t.people, label);
+  v.querySelectorAll("tr[data-person]").forEach((tr) => (tr.onclick = () => drillPerson(t.people.find((p) => p.id === +tr.dataset.person), f)));
+  if ($("#tagBtn")) $("#tagBtn").onclick = () => renderTagList(f, roster.staff);
+  if (t.canTag) bindRoster(roster.staff);
+}
+
+async function scanMonths(f, btn) {
+  btn.disabled = true;
+  let total = 0;
+  try {
+    for (let i = 0; i < 100; i++) {
+      const r = await api("/api/staff/scan", { method: "POST", body: { from: f.from, to: f.to } });
+      total += r.scanned;
+      btn.textContent = `Reading\u2026 ${total} done, ${r.remaining} to go`;
+      if (!r.remaining || !r.scanned) break;
+    }
+    toast(`Read ${total} reviews`);
+  } catch (err) { toast(err.message, true); }
+  renderStaff();
+}
+
+function downloadCsv(people, label) {
+  const cell = (x) => `"${String(x ?? "").replace(/"/g, '""')}"`;
+  const lines = [["Name", "Store", "Role", "Reviews", "4-5 stars", "3 stars", "1-2 stars", "Average stars"].map(cell).join(",")]
+    .concat(people.map((p) => [p.full_name, storeName(p.rooftop_key), ROLE_LABEL[p.role], p.reviews, p.positive, p.neutral, p.negative, p.avg_stars].map(cell).join(",")));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lines.join("\r\n")], { type: "text/csv" }));
+  a.download = `staff-reviews-${label.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.csv`;
+  a.click();
+}
+
+async function drillPerson(p, f) {
+  const box = $("#drill");
+  box.innerHTML = `<p class="meta">Loading reviews for ${esc(p.full_name)}\u2026</p>`;
+  try {
+    const d = await api(`/api/reviews?view=all&staff=${p.id}&from=${f.from}&to=${f.to}`);
+    const prevView = state.view; state.view = "all";
+    box.innerHTML = `<h3 style="margin:18px 0 8px">Reviews naming ${esc(p.full_name)}</h3><div class="list">${d.reviews.map(rowHtml).join("")}</div>`;
+    state.view = prevView;
+    state.rows = d.reviews;
+    box.querySelector(".list").onclick = (e) => {
+      const q = e.target.closest("[data-esc]"); if (q) return openDetail(q.dataset.esc, true);
+      const b = e.target.closest(".row"); if (b) openDetail(b.dataset.id);
+    };
+    box.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (err) { box.innerHTML = `<p class="late">${esc(err.message)}</p>`; }
+}
+
+async function renderTagList(f, staff) {
+  const box = $("#tagList");
+  box.innerHTML = `<p class="meta">Loading\u2026</p>`;
+  const q = new URLSearchParams({ from: f.from, to: f.to });
+  if (state.rooftop) q.set("rooftop", state.rooftop);
+  const d = await api(`/api/staff/untagged?${q}`);
+  const first = (n) => (n || "").toLowerCase().split(/\s+/)[0];
+  box.innerHTML = `<ul class="tag-queue">${d.mentions.map((m) => {
+    const pool = staff.filter((s) => s.rooftop_key === m.rooftop_key && s.active);
+    pool.sort((a, b) => (first(b.full_name) === first(m.name_raw)) - (first(a.full_name) === first(m.name_raw)) || a.full_name.localeCompare(b.full_name));
+    return `<li data-mention="${m.id}"><div><b>"${esc(m.name_raw)}"</b> <span class="meta">${esc(storeName(m.rooftop_key).replace(/^Lester Glenn /, ""))}, ${m.stars || "no"} \u2605, ${ago(m.review_time)}</span>
+      <p class="excerpt-full">${esc(m.text || "")}</p></div>
+      <div class="tag-ctl"><select data-assign="${m.id}"><option value="">Who is this?</option>${pool.map((s) => `<option value="${s.id}">${esc(s.full_name)} (${ROLE_LABEL[s.role]})</option>`).join("")}</select>
+      <button class="btn quiet" data-ignore="${m.id}">Not an employee</button><button class="btn quiet" data-open="${esc(m.review_id)}">Open review</button></div></li>`;
+  }).join("")}</ul>`;
+  const done = (li, msg) => { li.remove(); toast(msg); };
+  box.querySelectorAll("[data-assign]").forEach((sel) => (sel.onchange = async () => {
+    if (!sel.value) return;
+    try { await api("/api/staff/tag", { method: "POST", body: { op: "assign", mention_id: +sel.dataset.assign, staff_id: +sel.value } }); done(sel.closest("li"), "Tagged"); }
+    catch (err) { toast(err.message, true); }
+  }));
+  box.querySelectorAll("[data-ignore]").forEach((b) => (b.onclick = async () => {
+    try { await api("/api/staff/tag", { method: "POST", body: { op: "ignore", mention_id: +b.dataset.ignore } }); done(b.closest("li"), "Marked as not an employee"); }
+    catch (err) { toast(err.message, true); }
+  }));
+  box.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => openDetail(b.dataset.open)));
+}
+
+function rosterPanel(staff) {
+  const stores = state.me.rooftops.filter((r) => r.key !== "other");
+  const key = state.rooftop || state.rosterStore || (stores[0] && stores[0].key);
+  state.rosterStore = key;
+  const list = staff.filter((s) => s.rooftop_key === key);
+  return `<div class="panel" id="rosterPanel"><h3>Staff roster</h3>
+    <p class="note">Names in reviews are matched against each store's roster. Add nicknames (Mike for Michael) so they match. People who leave can be set inactive; their past counts stay.</p>
+    <label class="field" style="max-width:360px">Store<select id="rosterStore">${stores.map((r) => `<option value="${esc(r.key)}" ${r.key === key ? "selected" : ""}>${esc(r.name)}</option>`).join("")}</select></label>
+    ${list.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Role</th><th>Nicknames</th><th>Status</th><th></th></tr></thead><tbody>
+      ${list.map((s) => `<tr data-staff="${s.id}"><td><input data-k="full_name" value="${esc(s.full_name)}"></td>
+        <td><select data-k="role">${["sales", "service", "other"].map((r) => `<option value="${r}" ${s.role === r ? "selected" : ""}>${ROLE_LABEL[r]}</option>`).join("")}</select></td>
+        <td><input data-k="aliases" value="${esc(s.aliases)}" placeholder="Mike, Mikey"></td>
+        <td><select data-k="active"><option value="1" ${s.active ? "selected" : ""}>Active</option><option value="0" ${s.active ? "" : "selected"}>Inactive</option></select></td>
+        <td class="num"><button class="btn quiet" data-save-staff>Save</button><button class="btn quiet danger" data-del-staff>Remove</button></td></tr>`).join("")}
+      </tbody></table></div>` : `<p class="meta">No staff on this store's roster yet.</p>`}
+    <div class="roster-add">
+      <label class="field">Add people, one per line ("Full Name" or "Full Name, nickname, nickname")
+        <textarea id="rosterText" rows="4" placeholder="Michael Smith, Mike&#10;Kaitlyn Jones, Katie"></textarea></label>
+      <label class="field" style="max-width:220px">Role for these people<select id="rosterRole"><option value="sales">Sales</option><option value="service">Service</option><option value="other">Other</option></select></label>
+      <button class="btn primary" id="rosterAdd">Add to roster</button>
+    </div></div>`;
+}
+
+function bindRoster() {
+  $("#rosterStore").onchange = (e) => { state.rosterStore = e.target.value; renderStaff(); };
+  $("#rosterAdd").onclick = async (e) => {
+    e.target.disabled = true;
+    try {
+      const r = await api("/api/staff/roster", { method: "POST", body: { op: "bulk", rooftop: state.rosterStore, text: $("#rosterText").value, role: $("#rosterRole").value } });
+      toast(`Added ${r.added}${r.skipped ? `, ${r.skipped} already listed` : ""}. ${r.rematched} review tags updated.`);
+      renderStaff();
+    } catch (err) { toast(err.message, true); e.target.disabled = false; }
+  };
+  document.querySelectorAll("[data-save-staff]").forEach((b) => (b.onclick = async () => {
+    const tr = b.closest("tr"), val = (k) => tr.querySelector(`[data-k="${k}"]`).value;
+    try {
+      const r = await api("/api/staff/roster", { method: "POST", body: { op: "update", id: +tr.dataset.staff, full_name: val("full_name"), role: val("role"), aliases: val("aliases"), active: val("active") === "1" } });
+      toast(`Saved. ${r.rematched} review tags updated.`); renderStaff();
+    } catch (err) { toast(err.message, true); }
+  }));
+  document.querySelectorAll("[data-del-staff]").forEach((b) => (b.onclick = async () => {
+    const tr = b.closest("tr");
+    if (!confirm("Remove this person? If they've been tagged on reviews, they're set inactive instead so their counts are kept.")) return;
+    try { await api("/api/staff/roster", { method: "POST", body: { op: "delete", id: +tr.dataset.staff } }); toast("Removed"); renderStaff(); }
+    catch (err) { toast(err.message, true); }
+  }));
+}
+
+/* ---------- Topics ---------- */
+
+function sentimentClass(x) {
+  const t = (x.positive || 0) + (x.negative || 0) + (x.neutral || 0) || 1;
+  if ((x.negative || 0) / t >= 0.6) return "neg";
+  if ((x.positive || 0) / t >= 0.6) return "pos";
+  return "mixed";
+}
+
+async function renderTopics() {
+  closeDetail();
+  const v = $("#view");
+  const f = state.topicFilter || (() => {
+    const d = new Date(); const to = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    d.setMonth(d.getMonth() - 2); const from = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    return (state.topicFilter = { from, to });
+  })();
+  const controls = `<div class="filters" id="topicFilters">
+    <label>From <select id="tFrom">${monthOptions(f.from)}</select></label>
+    <label>To <select id="tTo">${monthOptions(f.to)}</select></label></div>`;
+  v.innerHTML = controls + `<div class="empty-state">Gathering topics\u2026</div>`;
+  const bind = () => {
+    const apply = () => { f.from = $("#tFrom").value; f.to = $("#tTo").value; if (f.from > f.to) f.to = f.from; renderTopics(); };
+    $("#tFrom").onchange = apply; $("#tTo").onchange = apply;
+  };
+  bind();
+  const q = new URLSearchParams({ from: f.from, to: f.to });
+  if (state.rooftop) q.set("rooftop", state.rooftop);
+  let t;
+  try { t = await api(`/api/topics?${q}`); } catch (err) { v.innerHTML = controls + `<div class="empty-state"><strong>Topics didn't load</strong>${esc(err.message)}</div>`; bind(); return; }
+  if (!t.ready) { v.innerHTML = `<div class="empty-state"><strong>One-time setup needed</strong>Run the SQL in <code>migrations/0010_insights.sql</code> in the D1 console, then reload.</div>`; return; }
+  const canRead = state.me.role === "admin" || state.me.canReply;
+  const cov = t.coverage || {}, unread = (cov.total || 0) - (cov.scanned || 0);
+  const where = state.rooftop ? storeName(state.rooftop) : "all stores";
+  const coverage = `<div class="panel cov"><div><b>${cov.scanned || 0}</b> of <b>${cov.total || 0}</b> written reviews for ${esc(where)} in this range have been read for topics.
+      ${unread > 0 ? `<span class="late">${unread} not read yet.</span>` : ""}</div>
+      ${canRead && unread > 0 ? `<button class="btn primary" id="topicScan">Read ${unread} reviews now</button>` : ""}</div>`;
+  if (!t.phrases.length && !t.themes.length) {
+    v.innerHTML = controls + coverage + `<div class="empty-state"><strong>No topics yet</strong>Once reviews in this range are read, the most common topics show up here.</div>`;
+    bind(); if ($("#topicScan")) $("#topicScan").onclick = (e) => scanTopics(f, e.target); return;
+  }
+  const max = Math.max(...t.phrases.map((p) => p.total), 1), min = Math.min(...t.phrases.map((p) => p.total));
+  const size = (n) => 13 + Math.round(((n - min) / Math.max(max - min, 1)) * 27);
+  const shuffled = t.phrases.slice().sort((a, b) => (a.label < b.label ? -1 : 1)); // stable, alphabetical spread
+  const cloud = shuffled.map((p) => `<button class="word ${sentimentClass(p)}" style="font-size:${size(p.total)}px" data-kind="phrase" data-label="${esc(p.label)}"
+      title="${p.total} review${p.total === 1 ? "" : "s"}">${esc(p.label)}</button>`).join("");
+  const themeMax = Math.max(...t.themes.map((x) => x.total), 1);
+  const themes = t.themes.map((x) => `<button class="theme-row" data-kind="theme" data-label="${esc(x.label)}">
+      <span class="theme-name">${esc(x.label)}</span>
+      <span class="theme-bar" style="width:${Math.max(6, Math.round((x.total / themeMax) * 100))}%"><i class="pos" style="flex:${x.positive || 0}"></i><i class="mid" style="flex:${x.neutral || 0}"></i><i class="neg" style="flex:${x.negative || 0}"></i></span>
+      <span class="theme-n">${x.total}</span></button>`).join("");
+  v.innerHTML = controls + coverage + `
+    <div class="panel"><h3>Word cloud, ${esc(where)}</h3>
+      <p class="note">Bigger means more reviews mention it. <span class="key pos">Mostly positive</span> <span class="key neg">Mostly negative</span> <span class="key mixed">Mixed</span>. Click a word for details.</p>
+      <div class="cloud">${cloud}</div></div>
+    <div class="panel"><h3>Themes</h3><p class="note">Bars split by how reviews felt about each theme: <span class="key pos">positive</span> <span class="key mixed">neutral</span> <span class="key neg">negative</span>.</p>
+      <div class="themes">${themes}</div></div>
+    <div id="topicDrill"></div>`;
+  bind();
+  if ($("#topicScan")) $("#topicScan").onclick = (e) => scanTopics(f, e.target);
+  v.querySelectorAll("[data-kind]").forEach((b) => (b.onclick = () => drillTopic(b.dataset.kind, b.dataset.label, f, [...t.phrases, ...t.themes].find((x) => x.label === b.dataset.label), cov.total)));
+}
+
+async function scanTopics(f, btn) {
+  btn.disabled = true;
+  let total = 0;
+  try {
+    for (let i = 0; i < 200; i++) {
+      const r = await api("/api/staff/scan", { method: "POST", body: { from: f.from, to: f.to } });
+      total += r.scanned;
+      btn.textContent = `Reading\u2026 ${total} done, ${r.remaining} to go`;
+      if (!r.remaining || !r.scanned) break;
+    }
+    toast(`Read ${total} reviews`);
+  } catch (err) { toast(err.message, true); }
+  renderTopics();
+}
+
+async function drillTopic(kind, label, f, stat, totalReviews) {
+  const box = $("#topicDrill");
+  box.innerHTML = `<div class="panel"><p class="meta">Loading \u201c${esc(label)}\u201d\u2026</p></div>`;
+  box.scrollIntoView({ behavior: "smooth", block: "start" });
+  const q = new URLSearchParams({ from: f.from, to: f.to, kind, label });
+  if (state.rooftop) q.set("rooftop", state.rooftop);
+  const lq = new URLSearchParams({ view: "all", topickind: kind, topic: label });
+  if (state.rooftop) lq.set("rooftop", state.rooftop);
+  const rng = await api(`/api/topics/detail?${q}`).catch(() => ({ monthly: [] }));
+  const list = await api(`/api/reviews?${lq}&start=${f.from}-01&end=${lastDay(f.to)}`).catch(() => ({ reviews: [] }));
+  const m = rng.monthly || [];
+  const peak = Math.max(...m.map((x) => x.total), 1);
+  const bars = m.map((x) => `<div class="mbar" title="${x.total} reviews"><span class="pos" style="height:${(x.positive || 0) / peak * 100}%"></span><span class="mid" style="height:${(x.neutral || 0) / peak * 100}%"></span><span class="neg" style="height:${(x.negative || 0) / peak * 100}%"></span>
+      <em>${new Date(x.month + "-02").toLocaleDateString(undefined, { month: "short" })}</em><b>${x.total}</b></div>`).join("");
+  const s = stat || { total: 0, positive: 0, negative: 0, neutral: 0 };
+  const prevView = state.view; state.view = "all";
+  const rows = list.reviews.map(rowHtml).join("");
+  state.view = prevView; state.rows = list.reviews;
+  box.innerHTML = `<div class="panel"><div class="panel-head"><h3>${kind === "theme" ? "Theme" : "Phrase"}: \u201c${esc(label)}\u201d</h3><button class="close" aria-label="Close" id="closeDrill">\u00d7</button></div>
+    <div class="kpis kpis-4">
+      <div class="kpi"><div class="fig">${s.total}</div><div class="cap">Reviews mentioning it</div></div>
+      <div class="kpi"><div class="fig">${totalReviews ? Math.round(s.total / totalReviews * 100) : 0}<small>%</small></div><div class="cap">Of written reviews</div></div>
+      <div class="kpi"><div class="fig pos-text">${s.positive || 0}</div><div class="cap">Positive</div></div>
+      <div class="kpi"><div class="fig neg-text">${s.negative || 0}</div><div class="cap">Negative</div></div>
+    </div>
+    <h3 style="margin-top:14px">By month</h3><div class="mbars">${bars || `<p class="meta">No data.</p>`}</div>
+    <h3 style="margin-top:14px">Reviews</h3>${rows ? `<div class="list">${rows}</div>` : `<p class="meta">No reviews found.</p>`}</div>`;
+  $("#closeDrill").onclick = () => (box.innerHTML = "");
+  const l = box.querySelector(".list");
+  if (l) l.onclick = (e) => { const qb = e.target.closest("[data-esc]"); if (qb) return openDetail(qb.dataset.esc, true); const b = e.target.closest(".row"); if (b) openDetail(b.dataset.id); };
+}
+
+function lastDay(ym) {
+  const [y, mo] = ym.split("-").map(Number);
+  return new Date(Date.UTC(y, mo, 0)).toISOString().slice(0, 10);
+}
+
+/* ---------- Statistics ---------- */
+
+async function renderStats() {
+  const v = $("#view");
+  closeDetail();
+  const days = state.statsDays; // -1 means custom range
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const range = `<div class="filters"><label for="sDays" class="sr">Time range</label>
+    <select id="sDays">${[[30, "Last 30 days"], [90, "Last 90 days"], [365, "Last 12 months"], [0, "All time"], [-1, "Custom range\u2026"]]
+      .map(([d, l]) => `<option value="${d}" ${d === days ? "selected" : ""}>${l}</option>`).join("")}</select>
+    ${days === -1 ? `<div class="custom-range">
+      <label>From <input type="date" id="sStart" value="${esc(state.statsStart)}" max="${today}"></label>
+      <label>To <input type="date" id="sEnd" value="${esc(state.statsEnd)}" max="${today}"></label></div>` : ""}</div>`;
+  const bindRange = () => {
+    $("#sDays").onchange = (e) => { state.statsDays = parseInt(e.target.value, 10); renderStats(); };
+    const dates = () => {
+      let a = $("#sStart").value, b = $("#sEnd").value;
+      if (a && b && a > b) [a, b] = [b, a];
+      state.statsStart = a; state.statsEnd = b; renderStats();
+    };
+    if ($("#sStart")) { $("#sStart").onchange = dates; $("#sEnd").onchange = dates; }
+  };
+  v.innerHTML = range + `<div class="empty-state">${days === -1 && !state.statsStart && !state.statsEnd ? "Pick a start and end date." : "Crunching the numbers\u2026"}</div>`;
+  bindRange();
+  if (days === -1 && !state.statsStart && !state.statsEnd) return;
+  const q = new URLSearchParams(days === -1 ? { days: "0", start: state.statsStart, end: state.statsEnd } : { days: String(days) });
+  if (state.rooftop) q.set("rooftop", state.rooftop);
+  let s;
+  try { s = await api(`/api/stats?${q}`); } catch (e) {
+    v.innerHTML = range + `<div class="empty-state"><strong>Statistics didn't load</strong>${esc(e.message)}</div>`;
+    return;
+  }
+  const o = s.overall;
+  if (!o.total) {
+    v.innerHTML = range + `<div class="empty-state"><strong>No reviews in this range</strong>Pick a longer time range or another store.</div>`;
+    bindRange();
+    return;
+  }
+  const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
+  const replied = (o.by_agent || 0) + (o.by_manager || 0) + (o.by_google || 0);
+
+  const kpis = `<div class="kpis">
+    <div class="kpi"><div class="fig">${pct(o.answered, o.total)}<small>%</small></div><div class="cap">Response rate</div></div>
+    <div class="kpi"><div class="fig">${hoursLabel(o.avg_hours)}</div><div class="cap">Average time to reply</div></div>
+    <div class="kpi"><div class="fig">${pct(o.within_24, o.answered)}<small>%</small></div><div class="cap">Replies within 24 hours</div></div>
+    <div class="kpi"><div class="fig">${o.avg_stars ?? "\u2013"}</div><div class="cap">Average rating, ${o.total} reviews</div></div>
+    <button class="kpi kpi-link" data-open-unanswered="" ${o.open ? "" : "disabled"}><div class="fig">${o.open}</div><div class="cap">Still unanswered${o.open ? " \u203a" : ""}</div></button>
+  </div>`;
+
+  const rows = s.rooftops.slice().sort((a, b) => b.total - a.total).map((r) => {
+    const rate = pct(r.answered, r.total);
+    const oldest = r.oldest_open ? (Date.now() - Date.parse(r.oldest_open)) / 86400000 : null;
+    return `<tr><td>${esc(r.name.replace(/^Lester Glenn /, ""))}</td><td class="num">${r.total}</td><td class="num">${r.avg_stars ?? "\u2013"}</td>
+      <td><div class="rate"><div class="bar"><span class="${rate < 80 ? "warn" : ""}" style="width:${rate}%"></span></div>${rate}%</div></td>
+      <td class="num">${r.avg_hours == null ? "\u2013" : r.avg_hours < 48 ? Math.round(r.avg_hours) + " hr" : (r.avg_hours / 24).toFixed(1) + " days"}</td>
+      <td class="num">${r.open ? `<button class="link-btn" data-open-unanswered="${esc(r.rooftop_key)}">${r.open}</button>` : 0}</td>
+      <td class="num ${oldest > 3 ? "late" : ""}">${oldest == null ? "\u2013" : oldest < 1 ? "Today" : Math.round(oldest) + " days"}</td></tr>`;
+  }).join("");
+  const table = s.rooftops.length > 1 || !state.rooftop ? `<div class="panel"><h3>By store</h3>
+    <p class="note">Response rates under 80% show in red. Oldest open review turns red after 3 days.</p>
+    <div class="table-wrap"><table><thead><tr><th>Store</th><th class="num">Reviews</th><th class="num">Rating</th><th>Response rate</th>
+    <th class="num">Avg reply time</th><th class="num">Unanswered</th><th class="num">Oldest open</th></tr></thead><tbody>${rows}</tbody></table></div></div>` : "";
+
+  const dist = [5, 4, 3, 2, 1].map((n) => {
+    const c = s.stars.find((x) => x.stars === n)?.n || 0;
+    return `<span>${n} \u2605</span><div class="bar"><span style="width:${pct(c, o.total)}%"></span></div><span>${c}</span>`;
+  }).join("");
+
+  v.innerHTML = range + kpis + table + `<div class="split">
+    <div class="panel chart"><h3>Reviews and replies by month</h3>${monthlyChart(s.monthly)}
+      <div class="legend"><span><i style="background:var(--line)"></i>Reviews</span><span><i style="background:var(--blue)"></i>Answered</span></div></div>
+    <div>
+      <div class="panel"><h3>Rating mix</h3><div class="dist">${dist}</div></div>
+      <div class="panel"><h3>Who replied</h3><div class="dist">
+        <span>Agent, automatic</span><div class="bar"><span style="width:${pct(o.by_agent, replied)}%;background:var(--blue)"></span></div><span>${o.by_agent || 0}</span>
+        <span>Approved in dashboard</span><div class="bar"><span style="width:${pct(o.by_manager, replied)}%;background:var(--green)"></span></div><span>${o.by_manager || 0}</span>
+        <span>Directly in Google</span><div class="bar"><span style="width:${pct(o.by_google, replied)}%;background:var(--muted)"></span></div><span>${o.by_google || 0}</span>
+      </div></div>
+    </div></div>${escalationStatsHtml(s.escalations)}`;
+  bindRange();
+  v.querySelectorAll("[data-open-review]").forEach((b) => (b.onclick = () => openDetail(b.dataset.openReview)));
+  v.querySelectorAll("[data-open-unanswered]").forEach((b) => (b.onclick = () => {
+    // Open All reviews filtered to the same unanswered reviews this number counts
+    if (b.dataset.openUnanswered) state.rooftop = b.dataset.openUnanswered;
+    state.filters = state.statsDays === -1
+      ? { status: "noreply", stars: "", q: "", days: "custom", start: state.statsStart, end: state.statsEnd, source: "google" }
+      : { status: "noreply", stars: "", q: "", days: state.statsDays ? String(state.statsDays) : "", start: "", end: "", source: "google" };
+    renderRail();
+    setView("all");
+  }));
+}
+
+function escalationStatsHtml(e) {
+  if (!e || !e.ready) return "";
+  if (!e.escalated && !e.outcomes.length) return `<div class="panel"><h3>Escalations</h3><p class="meta">No escalations in this range.</p></div>`;
+  const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
+  const totalOut = e.outcomes.reduce((a, x) => a + x.n, 0);
+  const outcomeRows = e.outcomes.map((x) => `<span>${esc(x.label)}</span><div class="bar"><span style="width:${pct(x.n, totalOut)}%;background:${x.outcome === "updated" || x.outcome === "removed" ? "var(--green)" : x.outcome === "unreachable" ? "var(--red)" : "var(--blue)"}"></span></div><span>${x.n}</span>`).join("");
+  const avg = e.outcomes.length ? (e.outcomes.reduce((a, x) => a + (x.avg_days || 0) * x.n, 0) / totalOut) : null;
+  const storeRows = e.stores.sort((a, b) => b.escalated - a.escalated).map((x) => `<tr><td>${esc(x.name.replace(/^Lester Glenn /, ""))}</td><td class="num">${x.escalated}</td>
+    <td class="num">${x.recovered || 0}</td><td class="num">${pct(x.recovered || 0, x.escalated)}%</td></tr>`).join("");
+  const recent = e.recent.map((x) => `<li><button class="link-btn" data-open-review="${esc(x.id)}">${esc(storeName(x.rooftop_key).replace(/^Lester Glenn /, ""))}</button>
+    ${x.status === "removed" ? "review removed" : `${x.from_stars ?? "?"} \u2192 ${x.stars} stars`}<span class="meta">, escalated ${ago(x.escalation_first_at)}</span></li>`).join("");
+  return `<div class="split esc-stats">
+    <div class="panel"><h3>Recovered reviews</h3>
+      <p class="note">Escalated reviews where the customer raised their rating or removed the review afterward.</p>
+      <div class="kpis kpis-3">
+        <div class="kpi"><div class="fig">${e.escalated}</div><div class="cap">Reviews escalated</div></div>
+        <div class="kpi"><div class="fig">${e.recovered}</div><div class="cap">Recovered</div></div>
+        <div class="kpi"><div class="fig">${pct(e.recovered, e.escalated)}<small>%</small></div><div class="cap">Recovery rate</div></div>
+      </div>
+      ${storeRows ? `<div class="table-wrap"><table><thead><tr><th>Store</th><th class="num">Escalated</th><th class="num">Recovered</th><th class="num">Rate</th></tr></thead><tbody>${storeRows}</tbody></table></div>` : ""}
+      ${recent ? `<h3 style="margin-top:16px">Latest recoveries</h3><ul class="recoveries">${recent}</ul>` : ""}
+    </div>
+    <div class="panel"><h3>How escalations were resolved</h3>
+      ${totalOut ? `<div class="dist">${outcomeRows}</div>
+        <p class="meta" style="margin-top:10px">${totalOut} resolved${avg !== null ? `, on average ${avg.toFixed(1)} days after first being sent` : ""}.</p>`
+        : `<p class="meta">None resolved in this range yet. Outcomes are recorded when someone marks an escalation resolved.</p>`}
+    </div></div>`;
+}
+
+function monthlyChart(months) {
+  const data = months.slice(-12);
+  if (!data.length) return `<p class="note">Not enough data yet.</p>`;
+  const W = 600, H = 220, pad = 28, bw = (W - pad) / data.length;
+  const max = Math.max(...data.map((m) => m.total), 1);
+  const y = (v) => H - pad - (v / max) * (H - pad - 10);
+  const bars = data.map((m, i) => {
+    const x = pad + i * bw + bw * 0.18, w = bw * 0.64;
+    const label = new Date(m.month + "-02").toLocaleDateString(undefined, { month: "short" });
+    return `<rect x="${x}" y="${y(m.total)}" width="${w}" height="${H - pad - y(m.total)}" fill="var(--line)" rx="2"><title>${m.total} reviews</title></rect>
+      <rect x="${x + w * 0.2}" y="${y(m.answered)}" width="${w * 0.6}" height="${H - pad - y(m.answered)}" fill="var(--blue)" rx="2"><title>${m.answered} answered</title></rect>
+      <text x="${x + w / 2}" y="${H - 8}" text-anchor="middle">${label}</text>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Monthly reviews and replies">
+    <text x="0" y="${y(max) + 4}">${max}</text><line x1="${pad}" x2="${W}" y1="${H - pad}" y2="${H - pad}" stroke="var(--line)"/>${bars}</svg>`;
+}
+
+/* ---------- Settings (admins) ---------- */
+
+async function renderSettings() {
+  closeDetail();
+  const v = $("#view");
+  v.innerHTML = `<div class="empty-state">Loading settings\u2026</div>`;
+  let users, runs;
+  let guide, teams, backup, ext;
+  try { [users, runs, guide, teams, backup, ext] = await Promise.all([api("/api/admin/users"), api("/api/admin/runs"), api("/api/admin/guidelines"), api("/api/admin/teams"), api("/api/admin/backup"), api("/api/admin/external")]); }
+  catch (e) { v.innerHTML = `<div class="empty-state"><strong>Settings didn't load</strong>${esc(e.message)}</div>`; return; }
+  const m = state.me.mode;
+  const modeText = {
+    dry_run: "Dry run. The agent only works with sample data and never touches Google. Scheduled runs are paused in this mode; use Run agent now to test.",
+    shadow: "Shadow. The agent reads real Google reviews at 8am, 12pm, 4pm, and 8pm Eastern and writes drafts, but never posts.",
+    live: m === "live" && !state.me.autoPost ? "Live. Nothing posts on its own: every reply posts only when an approver clicks Approve and post."
+      : "Live. Four times a day, positive, low-risk replies post automatically, and approved replies post right away.",
+  }[m];
+
+  const roleName = { admin: "Admin", manager: "Manager", viewer: "View only" };
+  const userRows = users.builtInAdmins.map((e) => `<tr><td>${esc(e)}</td><td>Admin</td><td>All stores</td><td class="num"><span class="meta">Set in wrangler.toml</span></td></tr>`).join("") +
+    users.users.map((u) => `<tr><td>${esc(u.email)}</td><td>${roleName[u.role]}</td>
+      <td>${u.rooftops === "*" ? "All stores" : u.rooftops.split(",").map(storeName).map((n) => esc(n.replace(/^Lester Glenn /, ""))).join(", ")}</td>
+      <td class="num"><button class="btn quiet danger" data-remove="${esc(u.email)}">Remove</button></td></tr>`).join("");
+
+  const runRows = runs.runs.map((r) => `<tr><td>${new Date(r.started_at).toLocaleString(undefined, { timeZone: ET, month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} <span class="meta">(${ago(r.started_at)})</span></td><td>${esc(r.trigger.replace(/^manual:.*/, "Manual"))}</td>
+    <td class="num">${r.synced}</td><td class="num">${r.drafted}</td><td class="num">${r.flagged}</td><td class="num">${r.posted}</td>
+    <td class="num ${r.errors ? "late" : ""}">${r.errors}</td></tr>${r.notes ? `<tr><td colspan="7" class="meta" style="white-space:pre-wrap">${esc(r.notes)}</td></tr>` : ""}`).join("");
+
+  const locRows = runs.locations.map((l) => `<tr><td>${esc(l.title)}</td><td>${esc(storeName(l.rooftop_key))}</td>
+    <td>${l.backfill_done ? "Complete" : "Importing older reviews"}</td><td>${l.updated_at ? ago(l.updated_at) : "\u2013"}</td></tr>`).join("");
+
+  v.innerHTML = `<div class="settings-grid">
+    <div class="panel"><h3>Agent</h3><p>${modeText}</p>
+      <p class="note">To change modes, edit <code>AGENT_MODE</code> in wrangler.toml and deploy again.</p>
+      <div class="actions"><button class="btn primary" id="runNow">Run agent now</button>
+      ${m === "dry_run" ? `<button class="btn" id="loadSamples">Load sample data</button>` : ""}
+      <button class="btn quiet danger" id="clearSamples">Clear sample data</button></div>
+      <p class="meta" id="runResult"></p></div>
+    <div class="panel"><h3>Add or update a person</h3>
+      <form id="userForm" onsubmit="return false">
+        <label class="field">Microsoft email<input type="email" id="uEmail" required placeholder="name@lesterglenn.com" autocomplete="off"></label>
+        <label class="field">Role<select id="uRole"><option value="manager">Manager: review and approve replies</option>
+          <option value="viewer">View only: reviews and statistics</option><option value="admin">Admin: everything, including settings</option></select></label>
+        <fieldset class="field" style="border:0;padding:0;margin:0 0 10px"><legend>Stores (leave all unchecked for every store)</legend>
+          <div class="checks">${users.rooftops.filter((r) => r.key !== "other").map((r) => `<label><input type="checkbox" value="${esc(r.key)}"> ${esc(r.name.replace(/^Lester Glenn /, ""))}</label>`).join("")}</div></fieldset>
+        <button class="btn primary" id="saveUser">Save person</button>
+      </form>
+      <p class="note" style="margin-top:12px">They sign in with their Lester Glenn Microsoft account.</p></div>
+  </div>
+  ${teamsPanel(teams, users.rooftops)}
+  ${externalPanel(ext)}
+  ${backupPanel(backup)}
+  <div class="panel" id="guidePanel"><h3>Reply guidelines</h3>
+    <p class="note">${guide.custom ? `Custom guidelines saved by ${esc(guide.updatedBy || "an admin")}${guide.updatedAt ? ", " + ago(guide.updatedAt) : ""}.` : "Using the built-in starter guidelines."}
+      Claude follows these for every draft. Privacy and safety rules are always added on top, so they can't be edited away.</p>
+    ${guide.needsSetup ? `<p class="late">One-time setup needed: run the SQL in <code>migrations/0002_settings.sql</code> in the D1 console, then reload this page.</p>` : `
+    <div class="actions" style="margin:0 0 12px">
+      <button class="btn primary" id="learnGoogle" ${guide.available < guide.minReplies ? "disabled" : ""}>Learn from our Google replies (${guide.available} on file)</button>
+      <button class="btn" id="showPaste">Paste replies instead</button>
+      <button class="btn" id="fromEdits" ${(guide.edits?.total || 0) < 5 ? "disabled" : ""}>Suggest updates from our edits (${guide.edits?.since || 0} new)</button>
+    </div>
+    ${guide.available < guide.minReplies ? `<p class="note">Learning from Google needs at least ${guide.minReplies} replies your team wrote. They'll be on file once the agent syncs real reviews in shadow or live mode. Until then, paste replies.</p>` : ""}
+    <div id="pasteBox" hidden>
+      <label class="field">Paste past replies (copy them from Google Business Profile, one after another; including the review text helps)
+        <textarea id="pasteText" rows="8" style="width:100%;border:1px solid var(--line);border-radius:6px;padding:10px;font-weight:400"></textarea></label>
+      <button class="btn primary" id="learnPaste">Write guidelines from these</button>
+    </div>
+    <div id="lessonsBox"></div>
+    <label class="field" for="guideText" style="margin-top:12px">Guidelines (edit freely, then save)</label>
+    <textarea id="guideText" rows="22" style="width:100%;border:1px solid var(--line);border-radius:6px;padding:10px 12px;line-height:1.5;background:var(--panel)">${esc(guide.text)}</textarea>
+    <div class="actions">
+      <button class="btn primary" id="saveGuide">Save guidelines</button>
+      ${guide.custom ? `<button class="btn quiet danger" id="resetGuide">Go back to built-in guidelines</button>` : ""}
+    </div>
+    <div class="meta" id="guideStatus"></div>`}
+  </div>
+  <div class="panel"><h3>People with access</h3><div class="table-wrap"><table><thead><tr><th>Email</th><th>Role</th><th>Stores</th><th></th></tr></thead>
+    <tbody id="userRows">${userRows}</tbody></table></div></div>
+  <div class="panel"><h3>Recent agent runs</h3>${runRows ? `<div class="table-wrap"><table><thead><tr><th>When</th><th>Trigger</th><th class="num">Synced</th>
+    <th class="num">Drafted</th><th class="num">Flagged</th><th class="num">Posted</th><th class="num">Errors</th></tr></thead><tbody>${runRows}</tbody></table></div>` : `<p class="note">No runs yet.</p>`}</div>
+  ${locRows ? `<div class="panel"><h3>Google locations</h3><div class="table-wrap"><table><thead><tr><th>Google listing</th><th>Matched store</th><th>History import</th><th>Last synced</th></tr></thead><tbody>${locRows}</tbody></table></div></div>` : ""}`;
+
+  if (!guide.needsSetup) bindGuidelines();
+  if (teams.ready) bindTeams(teams);
+  bindExternal(ext);
+  if ($("#backupNow")) $("#backupNow").onclick = async (e) => {
+    e.target.disabled = true; e.target.textContent = "Backing up\u2026";
+    try { const r = await api("/api/admin/backup", { method: "POST" }); toast(r.message, !r.ok); renderSettings(); }
+    catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = "Back up now"; }
+  };
+  $("#runNow").onclick = async (e) => {
+    const b = e.target; b.disabled = true; b.textContent = "Running\u2026";
+    try {
+      const r = await api("/api/admin/run", { method: "POST" });
+      toast(`Run finished: ${r.synced} synced, ${r.drafted} drafted, ${r.flagged} flagged, ${r.posted} posted`);
+      await refreshCounts(); renderSettings();
+    } catch (err) { toast(err.message, true); b.disabled = false; b.textContent = "Run agent now"; }
+  };
+  const samples = async (action, b) => {
+    if (action === "clear" && !confirm("Remove all sample reviews? Real reviews are not affected.")) return;
+    b.disabled = true;
+    try {
+      const r = await api("/api/admin/samples", { method: "POST", body: { action } });
+      toast(action === "load" ? `Loaded ${r.loaded} sample reviews` : "Sample data cleared");
+      await refreshCounts(); renderSettings();
+    } catch (err) { toast(err.message, true); b.disabled = false; }
+  };
+  if ($("#loadSamples")) $("#loadSamples").onclick = (e) => samples("load", e.target);
+  $("#clearSamples").onclick = (e) => samples("clear", e.target);
+  $("#saveUser").onclick = async () => {
+    const rooftops = [...document.querySelectorAll(".checks input:checked")].map((c) => c.value);
+    try {
+      await api("/api/admin/users", { method: "POST", body: { email: $("#uEmail").value, role: $("#uRole").value, rooftops } });
+      toast("Person saved"); renderSettings();
+    } catch (err) { toast(err.message, true); }
+  };
+  $("#userRows").onclick = async (e) => {
+    const b = e.target.closest("[data-remove]");
+    if (!b || !confirm(`Remove access for ${b.dataset.remove}?`)) return;
+    try {
+      await api(`/api/admin/users?email=${encodeURIComponent(b.dataset.remove)}`, { method: "DELETE" });
+      toast("Access removed"); renderSettings();
+    } catch (err) { toast(err.message, true); }
+  };
+}
+
+function externalPanel(x) {
+  const ready = x.configured.key;
+  const rows = x.stores.map((st) => `<tr><td>${esc(st.name)}</td>
+    <td><input class="ext-id" data-store="${esc(st.key)}" data-kind="dr" value="${esc(x.ids[st.key]?.dr || "")}" inputmode="numeric" placeholder="e.g. 12345"></td>
+    <td><input class="ext-id" data-store="${esc(st.key)}" data-kind="cars" value="${esc(x.ids[st.key]?.cars || "")}" placeholder="Cars.com dealer ID"></td></tr>`).join("");
+  return `<div class="panel" id="extPanel"><h3>DealerRater and Cars.com</h3>
+    <p class="note">New reviews are pulled in every run, and approved replies post straight to the site.
+      Server: <code>${esc(x.server)}</code>.
+      API key: <b>${ready ? "set" : "not set"}</b>. Client ID and secret (for posting): <b>${x.configured.client ? "set" : "not set"}</b>.
+      ${ready ? "" : "Add <code>CARS_API_KEY</code>, <code>CARS_CLIENT_ID</code> and <code>CARS_CLIENT_SECRET</code> as Cloudflare secrets."}</p>
+    <div class="table-wrap"><table class="ext-table"><thead><tr><th>Store</th><th>DealerRater ID</th><th>Cars.com ID</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="actions">
+      <button class="btn primary" id="extSave">Save IDs</button>
+      <button class="btn" id="extFind" ${ready ? "" : "disabled"}>Find our DealerRater IDs</button>
+      <button class="btn" id="extTest" ${ready ? "" : "disabled"}>Test connection</button>
+    </div>
+    <div id="extOut"></div></div>`;
+}
+
+function bindExternal(x) {
+  if (!$("#extPanel")) return;
+  const out = $("#extOut");
+  $("#extSave").onclick = async (e) => {
+    const ids = {};
+    $("#extPanel").querySelectorAll(".ext-id").forEach((i) => { const v = i.value.trim(); if (v) (ids[i.dataset.store] ||= {})[i.dataset.kind] = v; });
+    e.target.disabled = true;
+    try { await api("/api/admin/external", { method: "POST", body: { op: "save", ids } }); toast("Saved. They'll be checked on the next run."); }
+    catch (err) { toast(err.message, true); }
+    e.target.disabled = false;
+  };
+  if ($("#extFind")) $("#extFind").onclick = async (e) => {
+    e.target.disabled = true; out.innerHTML = `<p class="meta">Searching DealerRater\u2026</p>`;
+    try {
+      const r = await api("/api/admin/external", { method: "POST", body: { op: "find", name: "Lester Glenn" } });
+      out.innerHTML = r.dealers.length ? `<p class="meta">Click an ID to copy it, then paste it next to the right store.</p>
+        <div class="table-wrap"><table><thead><tr><th>ID</th><th>Name on DealerRater</th><th>Address</th><th>Phone</th></tr></thead><tbody>
+        ${r.dealers.map((d) => `<tr><td><button class="link-btn" data-copy="${esc(String(d.id))}">${esc(String(d.id))}</button></td><td>${esc(d.name || "")}</td>
+          <td>${esc([d.address, d.city, d.state].filter(Boolean).join(", "))}</td><td>${esc(d.phone || "")}</td></tr>`).join("")}</tbody></table></div>`
+        : `<p class="meta">No DealerRater dealers found with "Lester Glenn" in the name.</p>`;
+      out.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.copy); toast(`Copied ${b.dataset.copy}`); } catch { toast(b.dataset.copy); } }));
+    } catch (err) { out.innerHTML = `<p class="late">${esc(err.message)}</p>`; }
+    e.target.disabled = false;
+  };
+  if ($("#extTest")) $("#extTest").onclick = async (e) => {
+    e.target.disabled = true; out.innerHTML = `<p class="meta">Testing\u2026</p>`;
+    try { const r = await api("/api/admin/external", { method: "POST", body: { op: "test" } });
+      out.innerHTML = `<ul class="${r.ok ? "test-ok" : "test-bad"}">${r.lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`; }
+    catch (err) { out.innerHTML = `<p class="late">${esc(err.message)}</p>`; }
+    e.target.disabled = false;
+  };
+}
+
+function backupPanel(b) {
+  const last = b.last;
+  return `<div class="panel"><h3>Weekly backup</h3>
+    ${b.configured ? `<p class="note">Every Sunday at 8pm Eastern, the whole database is saved to SharePoint
+      (<b>${esc(b.site)}</b>, folder <b>${esc(b.folder)}</b>) as a full backup file plus a reviews spreadsheet. The last 12 weeks are kept.
+      Files are saved using ${esc(b.user)}'s Microsoft sign-in.</p>
+      ${last ? `<p class="${last.ok ? "meta" : "late"}">Last backup ${whenLabel(last.at)}: ${esc(last.message)}</p>` : `<p class="meta">No backups yet.</p>`}
+      <div class="actions"><button class="btn" id="backupNow">Back up now</button></div>`
+    : `<p class="note">Not set up yet. Add <code>BACKUP_SITE</code> (your SharePoint site, for example <code>lesterglenn.sharepoint.com/sites/Marketing</code>) to wrangler.toml. See the README for the one-time IT step.</p>`}
+  </div>`;
+}
+
+function teamsPanel(t, rooftops) {
+  if (!t.ready) return `<div class="panel"><h3>Escalation teams</h3><p class="late">One-time setup needed: run the SQL in <code>migrations/0003_escalations.sql</code> in the D1 console, then reload this page.</p></div>`;
+  const stores = rooftops.filter((r) => r.key !== "other");
+  const count = (key, team) => (t.rows.find((x) => x.rooftop_key === key && x.team === team)?.emails || "").split(",").filter(Boolean).length;
+  return `<div class="panel" id="teamsPanel"><h3>Escalation teams</h3>
+    <p class="note">Who gets the email when someone escalates a review. Sales concerns go to the Sales list, Service to Service, Both to both lists, and Other to the Entire store list.
+      Each email sends from the Outlook mailbox of the person who escalates.</p>
+    <div class="table-wrap"><table><thead><tr><th>Store</th><th class="num">Sales</th><th class="num">Service</th><th class="num">Entire store</th></tr></thead><tbody>
+      ${stores.map((r) => `<tr><td>${esc(r.name.replace(/^Lester Glenn /, ""))}</td>${["sales", "service", "store"].map((tm) => `<td class="num ${count(r.key, tm) ? "" : "late"}">${count(r.key, tm) || "None"}</td>`).join("")}</tr>`).join("")}
+    </tbody></table></div>
+    <label class="field" style="margin-top:14px">Edit lists for<select id="teamStore">${stores.map((r) => `<option value="${esc(r.key)}">${esc(r.name)}</option>`).join("")}</select></label>
+    <div class="team-edit">
+      ${["sales", "service", "store"].map((tm) => `<label class="field">${{ sales: "Sales", service: "Service", store: "Entire store" }[tm]}
+        <textarea data-team="${tm}" rows="5" placeholder="One email per line"></textarea></label>`).join("")}
+    </div>
+    <p class="meta">Only ${t.domains.map(esc).join(", ")} addresses are allowed.</p>
+    <div class="actions"><button class="btn primary" id="saveTeams">Save lists for this store</button></div>
+  </div>`;
+}
+
+function bindTeams(t) {
+  const fill = () => {
+    const key = $("#teamStore").value;
+    document.querySelectorAll("[data-team]").forEach((ta) => {
+      ta.value = (t.rows.find((x) => x.rooftop_key === key && x.team === ta.dataset.team)?.emails || "").split(",").filter(Boolean).join("\n");
+    });
+  };
+  $("#teamStore").onchange = fill;
+  fill();
+  $("#saveTeams").onclick = async (e) => {
+    const body = { rooftop: $("#teamStore").value };
+    document.querySelectorAll("[data-team]").forEach((ta) => (body[ta.dataset.team] = ta.value));
+    e.target.disabled = true;
+    try {
+      await api("/api/admin/teams", { method: "POST", body });
+      toast("Lists saved");
+      const keep = body.rooftop;
+      await renderSettings();
+      $("#teamStore").value = keep; $("#teamStore").dispatchEvent(new Event("change"));
+    } catch (err) { toast(err.message, true); e.target.disabled = false; }
+  };
+}
+
+async function renderLessons() {
+  const box = $("#lessonsBox");
+  if (!box) return;
+  let d;
+  try { d = await api("/api/admin/lessons"); } catch { return; }
+  box.innerHTML = `<div class="lessons"><b>Lessons from feedback</b> <span class="meta">(added automatically from thumbs-down notes; every draft follows these)</span>
+    ${d.lessons.length ? `<ol>${d.lessons.map((l, i) => `<li><span>${esc(l.text)}</span> <span class="meta">${esc(l.by)}, ${ago(l.at)}</span>
+      <button class="btn quiet danger" data-lesson="${i}">Remove</button></li>`).join("")}</ol>` : `<p class="meta">None yet.</p>`}</div>`;
+  box.querySelectorAll("[data-lesson]").forEach((b) => (b.onclick = async () => {
+    if (!confirm("Remove this lesson? Future drafts will stop following it.")) return;
+    try { await api("/api/admin/lessons", { method: "POST", body: { op: "remove", index: +b.dataset.lesson } }); toast("Lesson removed"); renderLessons(); }
+    catch (err) { toast(err.message, true); }
+  }));
+}
+
+function bindGuidelines() {
+  renderLessons();
+  const status = $("#guideStatus");
+  const learn = async (source, btn) => {
+    const old = btn.textContent;
+    btn.disabled = true; btn.textContent = "Reading replies\u2026 (about a minute)";
+    status.textContent = "";
+    try {
+      const r = await api("/api/admin/guidelines/learn", { method: "POST", body: { source, text: source === "pasted" ? $("#pasteText").value : "" } });
+      $("#guideText").value = r.draft;
+      status.textContent = (r.used ? `Written from ${r.used} of your team's replies. ` : "Written from your pasted replies. ") +
+        "Nothing is saved yet: read it over, edit anything, then click Save guidelines.";
+      $("#guideText").focus();
+      $("#guideText").scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (err) { toast(err.message, true); }
+    btn.disabled = false; btn.textContent = old;
+  };
+  if ($("#learnGoogle")) $("#learnGoogle").onclick = (e) => learn("google", e.target);
+  if ($("#fromEdits")) $("#fromEdits").onclick = async (e) => {
+    const btn = e.target, old = btn.textContent;
+    btn.disabled = true; btn.textContent = "Reading your edits\u2026";
+    try {
+      const r = await api("/api/admin/guidelines/fromedits", { method: "POST" });
+      $("#guideText").value = r.draft;
+      status.innerHTML = `<b>What Claude noticed in your last ${r.used} edits:</b><ul class="edit-summary">${r.summary.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
+        Nothing is saved yet: read the updated guidelines below, edit anything, then click Save guidelines.`;
+      $("#guideText").scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (err) { toast(err.message, true); }
+    btn.disabled = false; btn.textContent = old;
+  };
+  $("#showPaste").onclick = () => { $("#pasteBox").hidden = !$("#pasteBox").hidden; if (!$("#pasteBox").hidden) $("#pasteText").focus(); };
+  $("#learnPaste").onclick = (e) => learn("pasted", e.target);
+  $("#saveGuide").onclick = async (e) => {
+    e.target.disabled = true;
+    try {
+      await api("/api/admin/guidelines", { method: "POST", body: { action: "save", text: $("#guideText").value } });
+      toast("Guidelines saved. New drafts will follow them.");
+      renderSettings();
+    } catch (err) { toast(err.message, true); e.target.disabled = false; }
+  };
+  if ($("#resetGuide")) $("#resetGuide").onclick = async () => {
+    if (!confirm("Go back to the built-in guidelines? Your custom version is kept as a backup in the database.")) return;
+    try { await api("/api/admin/guidelines", { method: "POST", body: { action: "reset" } }); toast("Back to built-in guidelines"); renderSettings(); }
+    catch (err) { toast(err.message, true); }
+  };
+}
+
+boot();

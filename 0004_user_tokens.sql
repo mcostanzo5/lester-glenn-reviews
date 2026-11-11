@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS ms_tokens (email TEXT PRIMARY KEY, token TEXT NOT NULL, updated_at TEXT);

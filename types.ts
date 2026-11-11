@@ -1,0 +1,121 @@
+export interface Env {
+  DB: D1Database;
+  ASSETS: Fetcher;
+  AGENT_MODE: string;
+  MS_TENANT_ID: string;
+  MS_CLIENT_ID: string;
+  MS_CLIENT_SECRET?: string;
+  SESSION_SECRET?: string;
+  MAIL_ALLOWED_DOMAINS?: string;
+  REPLY_APPROVERS?: string;
+  ADMIN_EMAILS: string;
+  MAX_AGE_DAYS: string;
+  MAX_DRAFTS_PER_RUN: string;
+  AUTO_POST_MIN_STARS: string;
+  CLAUDE_MODEL: string;
+  EXTERNAL_REQUEST_BUDGET: string;
+  BACKFILL_PAGES_PER_RUN: string;
+  RUN_HOURS_ET: string;
+  HISTORY_START?: string;
+  AUTO_POST?: string;
+  SELF_URL?: string;
+  STALE_ESCALATION_DAYS?: string; // days without a follow-up before managers are reminded (default 7)
+  CARS_API_BASE?: string;   // DealerRater / Cars.com Reputation API (production unless set to staging)
+  CARS_API_KEY?: string;
+  CARS_CLIENT_ID?: string;
+  CARS_CLIENT_SECRET?: string;
+  BACKUP_SITE?: string;   // e.g. lesterglenn.sharepoint.com/sites/Marketing
+  BACKUP_FOLDER?: string;
+  BACKUP_USER?: string;   // whose Microsoft sign-in saves the files
+  BACKUP_KEEP?: string; // this Worker's own address, used to hand scheduled runs to the pinned location
+  GBP_CLIENT_ID?: string;
+  GBP_CLIENT_SECRET?: string;
+  GBP_REFRESH_TOKEN?: string;
+  ANTHROPIC_API_KEY?: string;
+  // Local development only (.dev.vars). Never set in production.
+  DEV_AUTH_EMAIL?: string;
+}
+
+export type Mode = "dry_run" | "shadow" | "live";
+
+export type Status =
+  | "new"              // waiting for a draft
+  | "pending"          // needs a manager
+  | "ready"            // cleared to auto-post, but agent is not live
+  | "approved"         // manager approved, posts when agent is live
+  | "auto_posted"
+  | "approved_posted"
+  | "replied_external" // someone replied directly in Google
+  | "dismissed"        // manager chose not to reply here
+  | "old_unanswered"   // older than the drafting window, no reply
+  | "error"
+  | "external"         // added by hand from another site (Yelp, DealerRater...), not responded yet
+  | "external_done"    // responded to on that site
+  | "removed";         // the reviewer deleted it, or Google took it down
+
+export const ANSWERED: Status[] = ["auto_posted", "approved_posted", "replied_external"];
+
+export interface ReviewRow {
+  id: string;
+  location_name: string | null;
+  rooftop_key: string;
+  location_title: string | null;
+  stars: number;
+  text: string;
+  create_time: string;
+  update_time: string;
+  status: Status;
+  department: string | null;
+  sentiment: string | null;
+  risk_level: string | null;
+  risk_flags: string | null;
+  route_reason: string | null;
+  draft: string | null;
+  reply_text: string | null;
+  reply_time: string | null;
+  reply_source: string | null;
+  decided_by: string | null;
+  decided_at: string | null;
+  is_sample: number;
+  escalation_count?: number;      // emails sent about this review, ever
+  escalation_open?: number;       // sends since the last "resolved"
+  escalation_first_at?: string | null;
+  escalation_last_at?: string | null;
+  escalation_resolved_at?: string | null;
+}
+
+export interface User {
+  email: string;
+  name?: string;
+  // "link": signed in with Microsoft but not added to the dashboard. They can only
+  // open reviews that were escalated to them, read-only.
+  role: "admin" | "manager" | "viewer" | "link";
+  rooftops: string[] | "*";
+  canReply: boolean; // may approve, edit, redraft or dismiss replies (REPLY_APPROVERS)
+}
+
+export function mode(env: Env): Mode {
+  const m = (env.AGENT_MODE || "dry_run").trim().toLowerCase();
+  return m === "live" || m === "shadow" ? m : "dry_run";
+}
+
+/** Auto-posting is off unless AUTO_POST = "on". When off, every reply waits for an approver. */
+export function autoPost(env: Env): boolean {
+  return (env.AUTO_POST || "off").trim().toLowerCase() === "on";
+}
+
+export function num(v: string | undefined, fallback: number): number {
+  const n = parseInt(v ?? "", 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export function nowIso(): string {
+  return new Date().toISOString();
+}
+
+/** Normalize any timestamp to millisecond ISO so SQLite date math is consistent. */
+export function iso(value: string | undefined | null): string {
+  if (!value) return nowIso();
+  const d = new Date(value);
+  return isNaN(d.getTime()) ? nowIso() : d.toISOString();
+}

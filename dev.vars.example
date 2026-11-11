@@ -1,0 +1,5 @@
+# Copy to .dev.vars for local testing only. Never deploy this file.
+# Skips Microsoft sign-in on localhost and signs you in as this email.
+DEV_AUTH_EMAIL=mcostanzo@lesterglenn.com
+# Optional, to see real drafts locally:
+# ANTHROPIC_API_KEY=
