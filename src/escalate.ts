@@ -182,6 +182,7 @@ export const OUTCOMES: Record<string, string> = {
   updated: "Customer updated the review",
   removed: "Customer removed the review",
   unreachable: "Couldn't reach the customer",
+  unknown_info: "Unknown customer, reached out requesting additional info",
   other: "Other",
 };
 
