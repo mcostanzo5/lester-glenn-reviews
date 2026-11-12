@@ -29,6 +29,10 @@ migrations_dir = "migrations"
 [triggers]
 crons = ["0 0,1,12,13,16,17,20,21 * * *"]
 
+[observability.logs]
+enabled = false
+invocation_logs = true
+
 [vars]
 # dry_run: sample data only | shadow: reads Google, never posts | live: posts replies
 AGENT_MODE = "live"
