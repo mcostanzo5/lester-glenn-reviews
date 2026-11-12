@@ -148,12 +148,19 @@ async function saveLoc(env: Env, l: Loc) {
   ).bind(l.name, l.account, l.title, l.rooftop_key, l.newest_seen, l.backfill_token, l.backfill_done, nowIso()).run();
 }
 
+/** Google listings that aren't ours (IGNORE_LISTINGS): skipped entirely. */
+export function ignoredListing(env: Env, title: string): boolean {
+  const t = (title || "").toLowerCase();
+  return (env.IGNORE_LISTINGS || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean).some((x) => t.includes(x));
+}
+
 async function loadLocations(env: Env, client: GBPClient): Promise<Loc[]> {
   const saved = new Map((await env.DB.prepare("SELECT * FROM locations").all<any>()).results.map((r) => [r.name, r]));
   const out: Loc[] = [];
   for (const acct of await client.listAccounts()) {
     for (const l of await client.listLocations(acct.name)) {
       const title = l.title || l.name;
+      if (ignoredListing(env, title)) continue;
       const s = saved.get(l.name);
       out.push({
         name: l.name, account: acct.name, title, rooftop_key: matchRooftop(title).key,
@@ -419,7 +426,10 @@ async function inBatches<T>(items: T[], size: number, fn: (t: T) => Promise<void
   for (let i = 0; i < items.length; i += size) await Promise.all(items.slice(i, i + size).map(fn));
 }
 
-export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
+export type RunJob = "google" | "external" | "all";
+
+export async function runAgent(env: Env, trigger: string, job: RunJob = "google"): Promise<RunSummary> {
+  const doGoogle = job !== "external", doExternal = job !== "google";
   const m = mode(env);
   const started = nowIso();
   const s: RunSummary = { mode: m, synced: 0, drafted: 0, posted: 0, flagged: 0, errors: 0, notes: [] };
@@ -429,13 +439,13 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
 
   try {
     // 1a. DealerRater and Cars.com first, so a long Google sync can't use up the run's requests
-    if (m !== "dry_run" && externalConfigured(env)) {
+    if (doExternal && m !== "dry_run" && externalConfigured(env)) {
       try { s.synced += await syncExternal(env, budget, s.notes); }
       catch (e) { if (e instanceof BudgetExhausted) throw e; s.notes.push(`DealerRater/Cars.com: ${(e as Error).message}`); }
     }
 
     // 1. New reviews from every store
-    if (m !== "dry_run") {
+    if (doGoogle && m !== "dry_run") {
       try {
         client = new GBPClient(env, budget);
         locs = await loadLocations(env, client);
@@ -455,10 +465,12 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
       }
     }
 
+    if (doGoogle) {
     // 1b. Make sure reviews that still need attention haven't been deleted on Google
     if (client && budget.left > 14) {
       try { await verifyStillOnGoogle(env, client, budget, Math.min(8, budget.left - 14), s.notes); }
       catch (e) { if (e instanceof BudgetExhausted) throw e; }
+    }
     }
 
     // 2. Draft what's waiting, keeping one call in reserve per draft for posting when live
@@ -475,6 +487,7 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
       });
     }
 
+    if (doGoogle) {
     // 3. Live: post auto-cleared drafts and anything a manager approved
     if (m === "live" && client && budget.has(1)) {
       const toPost = (await env.DB.prepare(
@@ -493,6 +506,7 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
         }
       }
     }
+    }
 
     // 4. Read new reviews for staff names (needs migration 0006; skipped quietly until then)
     if (budget.has(2)) {
@@ -505,6 +519,7 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
       }
     }
 
+    if (doGoogle) {
     // 5. Older history for statistics, using whatever budget is left
     if (client && locs.length) s.synced += await backfill(env, client, locs, budget, s.notes);
 
@@ -513,13 +528,24 @@ export async function runAgent(env: Env, trigger: string): Promise<RunSummary> {
       try { await auditSweep(env, client, locs, budget, Math.min(12, budget.left - 2), s.notes); }
       catch (e) { if (e instanceof BudgetExhausted) throw e; }
     }
+    }
   } catch (e) {
     if (e instanceof BudgetExhausted) s.notes.push(e.message);
     else { s.errors++; s.notes.push((e as Error).message); }
   }
 
-  await env.DB.prepare(
+  // The run's work is already saved; recording it must never fail the run
+  const label = job === "external" ? `${trigger} (DealerRater/Cars.com)` : trigger;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await env.DB.prepare(
     `INSERT INTO runs (started_at, finished_at, mode, trigger, synced, drafted, posted, flagged, errors, notes) VALUES (?,?,?,?,?,?,?,?,?,?)`
-  ).bind(started, nowIso(), m, trigger, s.synced, s.drafted, s.posted, s.flagged, s.errors, s.notes.join("\n").slice(0, 4000)).run();
+  ).bind(started, nowIso(), m, label, s.synced, s.drafted, s.posted, s.flagged, s.errors, s.notes.join("\n").slice(0, 4000)).run();
+      break;
+    } catch (e) {
+      console.error(`Saving the run record failed (attempt ${attempt}): ${(e as Error).message}`);
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 500 * attempt));
+    }
+  }
   return s;
 }

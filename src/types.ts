@@ -19,6 +19,7 @@ export interface Env {
   HISTORY_START?: string;
   AUTO_POST?: string;
   SELF_URL?: string;
+  IGNORE_LISTINGS?: string; // comma-separated parts of Google listing names to skip (not our stores)
   STALE_ESCALATION_DAYS?: string; // days without a follow-up before managers are reminded (default 7)
   CARS_API_BASE?: string;   // DealerRater / Cars.com Reputation API (production unless set to staging)
   CARS_API_KEY?: string;

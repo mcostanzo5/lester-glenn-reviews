@@ -3,7 +3,8 @@ import { mode } from "./types";
 import { identify } from "./auth";
 import { callback, login, logout, msConfigured, page, sessionEmail } from "./msauth";
 import { handleApi, json } from "./api";
-import { runAgent } from "./agent";
+import { runAgent, type RunJob } from "./agent";
+import { externalConfigured } from "./cars";
 import { backupConfigured, runBackup } from "./backup";
 
 /** Secret header value that lets a scheduled run hand its work to this Worker's own address. */
@@ -40,7 +41,8 @@ export default {
     if (url.pathname === "/__scheduled-run" && req.method === "POST") {
       const given = req.headers.get("x-internal-run") || "";
       if (!given || !sameSecret(given, await internalToken(env))) return new Response("Not found", { status: 404 });
-      const s = await runAgent(env, "schedule");
+      const job: RunJob = url.searchParams.get("job") === "external" ? "external" : "google";
+      const s = await runAgent(env, "schedule", job);
       return new Response(JSON.stringify(s), { headers: { "content-type": "application/json" } });
     }
 
@@ -74,11 +76,14 @@ export default {
     if (mode(env) === "dry_run") return;
     // Only run at the configured Eastern hours; the other cron wake-ups exit right away
     if (!isRunHour(event.scheduledTime, env.RUN_HOURS_ET)) return;
+    // Staggered: on the hour Google, at :30 DealerRater and Cars.com, so no single run gets too long
+    const job: RunJob = (event.cron ? event.cron.trim().startsWith("30 ") : new Date(event.scheduledTime).getUTCMinutes() >= 30) ? "external" : "google";
+    if (job === "external" && !externalConfigured(env)) return;
     // Sunday's last run (8pm Eastern) also kicks off the weekly backup, in its own request
     const et = new Date(event.scheduledTime);
     const weekday = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" }).format(et);
     const hour = Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hourCycle: "h23" }).format(et));
-    if (weekday === "Sun" && hour === 20 && backupConfigured(env) && env.SELF_URL) {
+    if (job === "google" && weekday === "Sun" && hour === 20 && backupConfigured(env) && env.SELF_URL) {
       _ctx.waitUntil(fetch(`${env.SELF_URL.replace(/\/$/, "")}/__backup`, { method: "POST", headers: { "x-internal-run": await internalToken(env) } })
         .then(async (r) => console.log("backup", r.status, await r.text())).catch((e) => console.warn("backup failed", e)));
     }
@@ -88,7 +93,7 @@ export default {
     // eastern U.S. by [placement] in wrangler.toml. If that fails, run here as before.
     if (env.SELF_URL) {
       try {
-        const res = await fetch(`${env.SELF_URL.replace(/\/$/, "")}/__scheduled-run`, {
+        const res = await fetch(`${env.SELF_URL.replace(/\/$/, "")}/__scheduled-run?job=${job}`, {
           method: "POST", headers: { "x-internal-run": await internalToken(env) },
         });
         if (res.ok) { console.log("run (pinned)", await res.text()); return; }
@@ -97,7 +102,7 @@ export default {
         console.warn("handoff failed, running here instead", e);
       }
     }
-    const s = await runAgent(env, "schedule");
+    const s = await runAgent(env, "schedule", job);
     console.log("run", JSON.stringify(s));
   },
 } satisfies ExportedHandler<Env>;

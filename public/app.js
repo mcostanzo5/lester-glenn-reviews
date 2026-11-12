@@ -1569,6 +1569,7 @@ function externalPanel(x) {
       <button class="btn primary" id="extSave">Save IDs</button>
       <button class="btn" id="extFind" ${ready ? "" : "disabled"}>Find our DealerRater IDs</button>
       <button class="btn" id="extTest" ${ready ? "" : "disabled"}>Test connection</button>
+      <button class="btn" id="extRun" ${ready ? "" : "disabled"}>Check DealerRater &amp; Cars.com now</button>
     </div>
     <div id="extOut"></div></div>`;
 }
@@ -1595,6 +1596,13 @@ function bindExternal(x) {
         : `<p class="meta">No DealerRater dealers found with "Lester Glenn" in the name.</p>`;
       out.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = async () => { try { await navigator.clipboard.writeText(b.dataset.copy); toast(`Copied ${b.dataset.copy}`); } catch { toast(b.dataset.copy); } }));
     } catch (err) { out.innerHTML = `<p class="late">${esc(err.message)}</p>`; }
+    e.target.disabled = false;
+  };
+  if ($("#extRun")) $("#extRun").onclick = async (e) => {
+    e.target.disabled = true; out.innerHTML = `<p class="meta">Checking every DealerRater and Cars.com listing\u2026</p>`;
+    try { const r = await api("/api/admin/run", { method: "POST", body: { job: "external" } });
+      out.innerHTML = `<ul class="test-ok">${r.notes.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`; refreshCounts(); }
+    catch (err) { out.innerHTML = `<p class="late">${esc(err.message)}</p>`; }
     e.target.disabled = false;
   };
   if ($("#extTest")) $("#extTest").onclick = async (e) => {

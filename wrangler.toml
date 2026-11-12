@@ -27,11 +27,9 @@ migrations_dir = "migrations"
 # Eastern all year. If you change RUN_HOURS_ET, add the matching UTC hours
 # here (Eastern hour + 4 and + 5).
 [triggers]
-crons = ["0 0,1,12,13,16,17,20,21 * * *"]
-
-[observability.logs]
-enabled = false
-invocation_logs = true
+# On the hour: Google. At :30: DealerRater and Cars.com (staggered so no single run gets too long).
+# Both EST and EDT hours are listed; the Worker only runs at RUN_HOURS_ET Eastern time.
+crons = ["0 0,1,12,13,16,17,20,21 * * *", "30 0,1,12,13,16,17,20,21 * * *"]
 
 [vars]
 # dry_run: sample data only | shadow: reads Google, never posts | live: posts replies
@@ -60,6 +58,8 @@ EXTERNAL_REQUEST_BUDGET = "45"
 BACKFILL_PAGES_PER_RUN = "20"
 # This Worker's own address. Scheduled runs hand off to it so they run in the pinned location.
 SELF_URL = "https://lester-glenn-reviews.marketing-c09.workers.dev"
+# Google listings that aren't Lester Glenn stores: skipped entirely (comma-separated parts of the name)
+IGNORE_LISTINGS = "Ray Catena"
 # Managers get a daily reminder for open escalations with no email in this many days
 STALE_ESCALATION_DAYS = "7"
 # DealerRater / Cars.com Reputation API. Production; for testing use https://services.staging.dealerrater.com

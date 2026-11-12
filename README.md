@@ -310,6 +310,19 @@ drafts a reply to the review as it reads now; **Approve and replace reply**
 replaces the old reply on Google. Behind-the-scenes Google updates with no real
 change are ignored.
 
+## Run schedule and ignored listings
+
+Runs are staggered so none gets too long: on the hour (8, 12, 4, 8 Eastern) the
+agent checks Google; at :30 it checks DealerRater and Cars.com. Both draft whatever
+is new. **Run agent now** does the Google run; **Settings > DealerRater and
+Cars.com > Check DealerRater & Cars.com now** does the other. If saving a run's
+summary ever fails, it retries and logs the database's message, and the run's work
+is kept either way.
+
+`IGNORE_LISTINGS` in wrangler.toml lists parts of Google listing names to skip
+entirely (comma-separated), for listings in the Google account that aren't Lester
+Glenn stores.
+
 ## Removed reviews
 
 Google's list only includes reviews that still exist, so the agent watches for

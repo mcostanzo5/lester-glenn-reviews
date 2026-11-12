@@ -634,7 +634,9 @@ async function escalationStats(env: Env, user: User, rooftop: string | null, fro
 
 async function admin(env: Env, user: User, req: Request, path: string, url: URL, body: any) {
   if (user.role !== "admin") return fail("Only admins can do that.", 403);
-  if (path === "/api/admin/run" && req.method === "POST") return json(await runAgent(env, `manual:${user.email}`));
+  if (path === "/api/admin/run" && req.method === "POST") {
+    return json(await runAgent(env, `manual:${user.email}`, body?.job === "external" ? "external" : "google"));
+  }
   if (path === "/api/admin/samples" && req.method === "POST") {
     if (body?.action === "clear") { await clearSamples(env); return json({ ok: true }); }
     if (mode(env) !== "dry_run") return fail("Sample data can only be loaded in dry run mode.");
