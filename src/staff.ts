@@ -1,284 +1,587 @@
-import type { Env, User } from "./types";
-import { mode, nowIso } from "./types";
-import { Budget, BudgetExhausted } from "./budget";
+import type { Env, ReviewRow, Status } from "./types";
+import { ANSWERED, autoPost, mode, num, nowIso } from "./types";
+import { GBPClient, GBPError, type GReview } from "./gbp";
+import { matchRooftop, replyRooftop, rooftopByKey, rooftopFor } from "./rooftops";
+import { externalConfigured, isApiSource, postExternal, syncExternal } from "./cars";
+import { draftReply } from "./drafter";
+import { route } from "./router";
+import { Budget, BudgetExhausted, unlimited } from "./budget";
+import { etDayStart, scanReviews } from "./staff";
 
-// Finds employees named in reviews and ties them to each store's staff roster,
-// so reviews can be tallied per person by calendar month.
-//
-// Matching rules (per store):
-//  - exact full name or nickname match wins
-//  - otherwise first name (or nickname) must match, plus last name or last initial if the review gives one
-//  - if several people still match, the review's sales/service hint is used to pick one
-//  - still more than one: "ambiguous", someone tags it by hand
-//  - nobody on the roster: "unmatched", shows under Needs tagging until the person is added
-// Manual tags ("manual") and "not an employee" ("ignored") are never overwritten.
+const MAX_NEW_PAGES = 5; // only matters if a store gets 250+ new reviews between runs
 
-export type StaffRole = "sales" | "service" | "other";
-export interface Staff { id: number; rooftop_key: string; full_name: string; role: StaffRole; aliases: string; active: number }
-interface Found { name: string; role: string; sentiment: string }
-interface Topic { label: string; sentiment: string }
-interface Extracted { mentions: Found[]; themes: Topic[]; phrases: Topic[] }
+export interface RunSummary {
+  mode: string; synced: number; drafted: number; posted: number; flagged: number; errors: number; notes: string[];
+}
 
-// Fixed theme list, so trends can be compared month to month and store to store
-export const THEMES = [
-  "Sales experience", "Pricing and fees", "Financing and F&I", "Trade-in", "Service quality", "Wait time",
-  "Communication", "Staff friendliness", "Scheduling", "Parts availability", "Vehicle condition",
-  "Facility and cleanliness", "Loaner and shuttle", "Warranty and recalls", "Delivery", "Follow-up",
-];
+export async function logEvent(env: Env, reviewId: string | null, actor: string, action: string, detail = "") {
+  await env.DB.prepare("INSERT INTO events (review_id, actor, action, detail, at) VALUES (?,?,?,?,?)")
+    .bind(reviewId, actor, action, detail.slice(0, 2000), nowIso()).run();
+}
 
-const BATCH = 25;          // reviews per Claude call
-const MAX_TEXT = 1500;     // characters of each review sent
+function isFresh(r: { create_time: string; update_time: string }, days: number): boolean {
+  const cutoff = Date.now() - days * 86400_000;
+  return Date.parse(r.update_time) >= cutoff || Date.parse(r.create_time) >= cutoff;
+}
 
-export const canTag = (u: User) => u.role === "admin" || u.canReply;
+// Counts of reviewer-updated reviews found during this run (reported in the run notes)
+const updatedNotes: number[] = [];
 
-export const norm = (s: string) => s.toLowerCase().replace(/[^a-z' -]/g, " ").replace(/\s+/g, " ").trim();
-
-/** Roster members a name from a review could refer to. */
-export function candidates(raw: string, roleHint: string, roster: Staff[]): Staff[] {
-  const n = norm(raw);
-  if (!n) return [];
-  const parts = n.split(" ");
-  const first = parts[0];
-  const last = parts.length > 1 ? parts[parts.length - 1] : "";
-  const active = roster.filter((s) => s.active);
-  const aliasesOf = (s: Staff) => s.aliases.split(",").map(norm).filter(Boolean);
-
-  const exact = active.filter((s) => norm(s.full_name) === n || aliasesOf(s).includes(n));
-  let match = exact.length ? exact : active.filter((s) => {
-    const sp = norm(s.full_name).split(" ");
-    const sf = sp[0], sl = sp.length > 1 ? sp[sp.length - 1] : "";
-    if (!(sf === first || aliasesOf(s).includes(first))) return false;
-    if (!last) return true;
-    return sl === last || (last.length <= 2 && sl.startsWith(last));
+/** Work out each review's status, then write the whole page in one database batch. */
+async function savePage(env: Env, reviews: GReview[], loc: Loc, maxAge: number): Promise<number> {
+  if (!reviews.length) return 0;
+  const ids = reviews.map((r) => r.id);
+  const existing = new Map(
+    (await env.DB.prepare(`SELECT id, status, update_time, reply_source, text, route_reason, stars, rooftop_key, escalation_count FROM reviews WHERE id IN (${ids.map(() => "?").join(",")})`)
+      .bind(...ids).all<{ id: string; status: Status; update_time: string; reply_source: string | null; text: string; route_reason: string | null; stars: number; rooftop_key: string; escalation_count: number }>()).results.map((r) => [r.id, r])
+  );
+  const stmt = env.DB.prepare(
+    `INSERT INTO reviews (id, location_name, rooftop_key, location_title, stars, text, create_time, update_time,
+       status, reply_text, reply_time, reply_source, is_sample, synced_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?)
+     ON CONFLICT(id) DO UPDATE SET
+       location_name=excluded.location_name, rooftop_key=excluded.rooftop_key, location_title=excluded.location_title,
+       stars=excluded.stars, text=excluded.text, create_time=excluded.create_time, update_time=excluded.update_time,
+       status=excluded.status, reply_text=excluded.reply_text, reply_time=excluded.reply_time,
+       reply_source=excluded.reply_source, synced_at=excluded.synced_at`
+  );
+  const sameText = (a: string | null | undefined, b: string | null | undefined) =>
+    (a || "").replace(/\s+/g, " ").trim() === (b || "").replace(/\s+/g, " ").trim();
+  const restoredByEdit: string[] = [];
+  const updatedByReviewer: { id: string; prevText: string; prevStars: number }[] = [];
+  let flagged = new Set<string>();
+  try {
+    flagged = new Set((await env.DB.prepare(`SELECT id FROM reviews WHERE reviewer_updated_at IS NOT NULL AND id IN (${ids.map(() => "?").join(",")})`)
+      .bind(...ids).all<{ id: string }>()).results.map((r) => r.id));
+  } catch { /* migration 0012 not run yet */ }
+  const writes = reviews.map((g) => {
+    const ex = existing.get(g.id);
+    // The reviewer changed what they wrote or their rating (not just a behind-the-scenes Google update)
+    const changedByReviewer = !!ex && ex.status !== "removed" && (!sameText(ex.text, g.text) || (!!ex.stars && !!g.stars && ex.stars !== g.stars));
+    let status: Status;
+    let replySource: string | null = ex?.reply_source ?? null;
+    const handRemoved = !!ex && ex.status === "removed" && isHandRemoved(ex.route_reason);
+    if (handRemoved && sameText(ex!.text, g.text)) {
+      // Marked removed by hand and unchanged: Google's API can keep listing deleted reviews for a while
+      status = "removed";
+    } else if (handRemoved && g.reply_text) {
+      // The reviewer changed what they wrote, so it's a live review again
+      restoredByEdit.push(g.id);
+      status = "replied_external";
+      replySource = "google";
+    } else if (handRemoved) {
+      restoredByEdit.push(g.id);
+      status = isFresh(g, maxAge) ? "new" : "old_unanswered";
+      replySource = null;
+    } else if (changedByReviewer) {
+      // Bring it back to the Inbox even though our earlier reply is still on Google
+      updatedByReviewer.push({ id: g.id, prevText: ex!.text, prevStars: ex!.stars });
+      status = "new";
+    } else if (ex && flagged.has(g.id) && ex.update_time === g.update_time && !ANSWERED.includes(ex.status) && ex.status !== "removed") {
+      // Already flagged as updated and waiting on us: keep it in the Inbox until it's answered
+      status = ex.status;
+    } else if (g.reply_text) {
+      const ours = ex && (ex.status === "auto_posted" || ex.status === "approved_posted");
+      status = ours ? ex!.status : "replied_external";
+      if (!ours) replySource = "google";
+    } else if (!ex) {
+      status = isFresh(g, maxAge) ? "new" : "old_unanswered";
+    } else if (ex.update_time !== g.update_time || ANSWERED.includes(ex.status) || ex.status === "removed") {
+      // Edited by the customer, or our reply was removed: look again
+      status = isFresh(g, maxAge) ? "new" : "old_unanswered";
+      replySource = null;
+    } else {
+      status = ex.status;
+    }
+    return stmt.bind(g.id, loc.name, loc.rooftop_key, loc.title, g.stars, g.text, g.create_time, g.update_time,
+      status, g.reply_text, g.reply_time, replySource, nowIso());
   });
-  if (match.length > 1 && ["sales", "service", "other"].includes(roleHint)) {
-    const byRole = match.filter((s) => s.role === roleHint);
-    if (byRole.length === 1) match = byRole;
+  await env.DB.batch(writes);
+  // Star rating changes (a 2 that became a 5 after the store reached out is a recovered review)
+  for (const g of reviews) {
+    const ex = existing.get(g.id);
+    if (!ex || !ex.stars || !g.stars || ex.stars === g.stars) continue;
+    try {
+      await env.DB.prepare("INSERT INTO rating_changes (review_id, rooftop_key, old_stars, new_stars, changed_at, after_escalation) VALUES (?,?,?,?,?,?)")
+        .bind(g.id, ex.rooftop_key, ex.stars, g.stars, g.update_time || nowIso(), (ex.escalation_count || 0) > 0 ? 1 : 0).run();
+    } catch { /* migration 0010 */ }
+    await logEvent(env, g.id, "agent", "rating_changed", `${ex.stars} star${ex.stars === 1 ? "" : "s"} to ${g.stars} star${g.stars === 1 ? "" : "s"}`);
   }
-  return match;
-}
-
-function decide(raw: string, roleHint: string, roster: Staff[]): { staff_id: number | null; match: string } {
-  const c = candidates(raw, roleHint, roster);
-  if (c.length === 1) return { staff_id: c[0].id, match: "auto" };
-  return { staff_id: null, match: c.length > 1 ? "ambiguous" : "unmatched" };
-}
-
-async function rosterFor(env: Env, rooftop: string): Promise<Staff[]> {
-  return (await env.DB.prepare("SELECT * FROM staff WHERE rooftop_key = ?").bind(rooftop).all<Staff>()).results;
-}
-
-const EXTRACT_PROMPT = `You read Google reviews of car dealerships and list the dealership employees each review mentions by name.
-
-Include anyone who works at the dealership: salespeople, sales and finance managers, service advisors, technicians, service managers, parts staff, receptionists, porters, detailers.
-Exclude the reviewer, their family or friends, other customers, people at other businesses, brand or vehicle names, and words that only look like names.
-
-Keep each name exactly as written, for example "Mike", "Mike S.", or "Michael Smith". List each person once per review.
-role: "sales" for sales or finance, "service" for service advisors, technicians, service or parts staff, "other" for anyone else, "unknown" if the review doesn't say.
-sentiment: how the review talks about that person: "positive", "negative", or "neutral".
-
-Also tag what each review is about:
-themes: 1 to 4 that apply, chosen ONLY from this list: ${THEMES.join("; ")}.
-  Each with sentiment "positive", "negative", or "neutral" for how the review feels about that theme.
-phrases: up to 5 short key phrases (1 to 3 words, lowercase) for the specific things the review talks
-  about, written generically so the same idea gets the same words across reviews, for example
-  "oil change", "wait time", "no pressure", "hidden fees", "loaner car", "paperwork", "friendly staff".
-  Never include people's names, vehicle identification numbers, phone numbers, or prices.
-  Each with sentiment "positive", "negative", or "neutral".
-
-Respond with ONLY JSON, no preamble:
-{"results":[{"i":0,"mentions":[{"name":"Mike","role":"sales","sentiment":"positive"}],
-  "themes":[{"label":"Sales experience","sentiment":"positive"}],
-  "phrases":[{"label":"no pressure","sentiment":"positive"}]}]}
-Include one entry for every review i you were given, with empty lists when nothing applies.`;
-
-async function extract(env: Env, items: { i: number; text: string }[], budget: Budget): Promise<Map<number, Extracted>> {
-  if (!env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is not set.");
-  budget.take();
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "x-api-key": env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-    body: JSON.stringify({
-      model: env.CLAUDE_MODEL || "claude-sonnet-5",
-      max_tokens: 8000,
-      system: EXTRACT_PROMPT,
-      messages: [{ role: "user", content: JSON.stringify(items) }],
-    }),
-  });
-  if (!res.ok) {
-    const err: any = await res.json().catch(() => ({}));
-    throw new Error(`Claude API error ${res.status}: ${String(err?.error?.message || "no details").slice(0, 200)}`);
+  for (const u of updatedByReviewer) {
+    try {
+      await env.DB.prepare("UPDATE reviews SET reviewer_updated_at = ?, prev_text = ?, prev_stars = ?, draft = NULL, route_reason = NULL WHERE id = ?")
+        .bind(nowIso(), u.prevText, u.prevStars, u.id).run();
+    } catch { /* migration 0012 not run yet */ }
+    await logEvent(env, u.id, "agent", "review_updated", "The reviewer updated this review");
   }
-  const data: any = await res.json();
-  const raw = (data.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
-  const body = raw.replace(/^```(?:json)?|```$/gm, "").trim();
-  const parsed = JSON.parse(body.slice(body.indexOf("{"), body.lastIndexOf("}") + 1));
-  const out = new Map<number, Extracted>();
-  const sent = (v: any) => (["positive", "negative", "neutral"].includes(String(v)) ? String(v) : "neutral");
-  for (const r of parsed.results || []) {
-    const seen = new Set<string>();
-    const mentions = (r.mentions || [])
-      .map((m: any) => ({ name: String(m.name || "").trim().slice(0, 60), role: String(m.role || "unknown"), sentiment: sent(m.sentiment) }))
-      .filter((m: Found) => norm(m.name) && !seen.has(norm(m.name)) && seen.add(norm(m.name)));
-    const themeSeen = new Set<string>();
-    const themes = (r.themes || []).map((t: any) => ({ label: THEMES.find((x) => x.toLowerCase() === String(t.label || "").toLowerCase()) || "", sentiment: sent(t.sentiment) }))
-      .filter((t: Topic) => t.label && !themeSeen.has(t.label) && themeSeen.add(t.label)).slice(0, 4);
-    const phraseSeen = new Set<string>();
-    const phrases = (r.phrases || []).map((t: any) => ({ label: cleanPhrase(t.label), sentiment: sent(t.sentiment) }))
-      .filter((t: Topic) => t.label && !phraseSeen.has(t.label) && phraseSeen.add(t.label)).slice(0, 5);
-    out.set(Number(r.i), { mentions, themes, phrases });
+  if (updatedByReviewer.length) updatedNotes.push(updatedByReviewer.length);
+  for (const id of restoredByEdit) {
+    await env.DB.prepare("UPDATE reviews SET route_reason = NULL WHERE id = ?").bind(id).run();
+    await logEvent(env, id, "agent", "restored", "The reviewer changed the review text, so it's back from removed");
+  }
+  // Reviews moved by hand to a specific store (from the Auto Group listing) stay there
+  try { await env.DB.prepare(`UPDATE reviews SET rooftop_key = rooftop_override WHERE rooftop_override IS NOT NULL AND rooftop_key != rooftop_override AND id IN (${ids.map(() => "?").join(",")})`).bind(...ids).run(); }
+  catch { /* migration 0009 not run yet */ }
+  // Reviewer names are saved separately so syncing keeps working if migration 0007 hasn't been run yet
+  try { await env.DB.batch(reviews.map((g) => env.DB.prepare("UPDATE reviews SET reviewer_name = ? WHERE id = ?").bind(g.reviewer_name, g.id))); }
+  catch { /* reviewer_name column not added yet */ }
+  // If a customer edited their review text, read it again for staff names
+  const edited = reviews.filter((g) => existing.has(g.id) && existing.get(g.id)!.text !== g.text);
+  if (edited.length) {
+    try { await env.DB.batch(edited.map((g) => env.DB.prepare("UPDATE reviews SET mentions_scanned_at = NULL WHERE id = ?").bind(g.id))); }
+    catch { /* staff tables not set up yet */ }
+  }
+  return reviews.length;
+}
+
+interface Loc {
+  name: string; account: string; title: string; rooftop_key: string;
+  newest_seen: string | null; backfill_token: string | null; backfill_done: number;
+}
+
+async function saveLoc(env: Env, l: Loc) {
+  await env.DB.prepare(
+    `INSERT INTO locations (name, account_name, title, rooftop_key, newest_seen, backfill_token, backfill_done, updated_at)
+     VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET account_name=excluded.account_name, title=excluded.title,
+     rooftop_key=excluded.rooftop_key, newest_seen=excluded.newest_seen, backfill_token=excluded.backfill_token,
+     backfill_done=excluded.backfill_done, updated_at=excluded.updated_at`
+  ).bind(l.name, l.account, l.title, l.rooftop_key, l.newest_seen, l.backfill_token, l.backfill_done, nowIso()).run();
+}
+
+/** Google listings that aren't ours (IGNORE_LISTINGS): skipped entirely. */
+export function ignoredListing(env: Env, title: string): boolean {
+  const t = (title || "").toLowerCase();
+  return (env.IGNORE_LISTINGS || "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean).some((x) => t.includes(x));
+}
+
+async function loadLocations(env: Env, client: GBPClient): Promise<Loc[]> {
+  const saved = new Map((await env.DB.prepare("SELECT * FROM locations").all<any>()).results.map((r) => [r.name, r]));
+  const out: Loc[] = [];
+  for (const acct of await client.listAccounts()) {
+    for (const l of await client.listLocations(acct.name)) {
+      const title = l.title || l.name;
+      if (ignoredListing(env, title)) continue;
+      const s = saved.get(l.name);
+      out.push({
+        name: l.name, account: acct.name, title, rooftop_key: matchRooftop(title).key,
+        newest_seen: s?.newest_seen ?? null, backfill_token: s?.backfill_token ?? null, backfill_done: s?.backfill_done ?? 0,
+      });
+    }
   }
   return out;
 }
 
-/** Lowercase 1-3 word phrase, no digits or stray punctuation. */
-function cleanPhrase(v: unknown): string {
-  const p = String(v || "").toLowerCase().replace(/[^a-z&' -]/g, " ").replace(/\s+/g, " ").trim();
-  const words = p.split(" ").filter(Boolean);
-  return words.length && words.length <= 3 && p.length <= 30 ? words.join(" ") : "";
+/** Phase 1: new and edited reviews for every store, newest first. */
+/** Oldest review date worth importing (HISTORY_START, default Jan 1 2024, Eastern time). */
+function historyCutoff(env: Env): string {
+  return etDayStart(env.HISTORY_START || "2024-01-01") || etDayStart("2024-01-01")!;
 }
 
-let topicsReady: boolean | null = null;
-async function hasTopics(env: Env): Promise<boolean> {
-  if (topicsReady) return true;
-  try { await env.DB.prepare("SELECT topics_scanned_at FROM reviews LIMIT 1").first(); await env.DB.prepare("SELECT 1 FROM review_topics LIMIT 1").first(); topicsReady = true; }
-  catch { topicsReady = false; }
-  return topicsReady;
+/** Reviews in a page that are new enough to keep, and whether the page reached past the cutoff.
+ *  Google sorts by last update, newest first, so once one is older than the cutoff, all the rest are too. */
+function withinHistory(reviews: GReview[], cutoff: string) {
+  return {
+    keep: reviews.filter((r) => r.create_time >= cutoff),
+    pastCutoff: reviews.some((r) => r.update_time < cutoff),
+  };
 }
 
-/** Reads unscanned reviews (newest first): who they mention, and what they're about. */
-export async function scanReviews(env: Env, budget: Budget, opts: { from?: string; to?: string; rooftops?: string[] | "*"; maxBatches: number }) {
-  const topics = await hasTopics(env);
-  const where = [topics ? "(mentions_scanned_at IS NULL OR topics_scanned_at IS NULL)" : "mentions_scanned_at IS NULL"];
-  const args: unknown[] = [];
-  if (mode(env) !== "dry_run") where.push("is_sample = 0");
-  if (opts.from) { where.push("create_time >= ?"); args.push(opts.from); }
-  if (opts.to) { where.push("create_time < ?"); args.push(opts.to); }
-  if (opts.rooftops && opts.rooftops !== "*") { where.push(`rooftop_key IN (${opts.rooftops.map(() => "?").join(",") || "''"})`); args.push(...opts.rooftops); }
-  let siteTags = false;
-  try { await env.DB.prepare("SELECT site_tags FROM reviews LIMIT 1").first(); siteTags = true; } catch { /* migration 0014 */ }
-  const sql = `SELECT id, rooftop_key, create_time, stars, text${siteTags ? ", site_tags" : ""} FROM reviews WHERE ${where.join(" AND ")}`;
-  let scanned = 0, found = 0;
-  const rosters = new Map<string, Staff[]>();
-
-  for (let b = 0; b < opts.maxBatches; b++) {
-    const rows = (await env.DB.prepare(`${sql} ORDER BY create_time DESC LIMIT ?`).bind(...args, BATCH).all<any>()).results;
-    if (!rows.length) break;
-    const withText = rows.filter((r) => (r.text || "").trim());
-    let results = new Map<number, Extracted>();
-    if (withText.length) {
-      if (!budget.has(1)) break;
-      results = await extract(env, withText.map((r, i) => ({ i, text: String(r.text).slice(0, MAX_TEXT) })), budget);
-    }
-    const writes: D1PreparedStatement[] = [];
-    for (const r of rows) {
-      const i = withText.indexOf(r);
-      const got = i >= 0 ? results.get(i) : undefined;
-      // DealerRater / Cars.com employee tags come first; Claude's reading of the text adds anyone else
-      let tags: { name: string; role: string; sentiment: string }[] = [];
-      try { tags = (r as any).site_tags ? JSON.parse((r as any).site_tags) : []; } catch { tags = []; }
-      const sameAsTag = (name: string) => {
-        const n = norm(name).split(" ");
-        return tags.some((t) => {
-          const tn = norm(t.name).split(" ");
-          return tn[0] === n[0] && (n.length === 1 || tn[tn.length - 1] === n[n.length - 1] || (n[n.length - 1].length <= 2 && tn[tn.length - 1].startsWith(n[n.length - 1])));
-        });
-      };
-      const mentions = [
-        ...tags.map((t) => ({ name: t.name, role: t.role, sentiment: t.sentiment, site: true })),
-        ...(got?.mentions || []).filter((m) => !sameAsTag(m.name)).map((m) => ({ ...m, site: false })),
-      ];
-      if (!rosters.has(r.rooftop_key)) rosters.set(r.rooftop_key, await rosterFor(env, r.rooftop_key));
-      const kept = (await env.DB.prepare("SELECT name_raw FROM mentions WHERE review_id = ? AND match IN ('manual','ignored')").bind(r.id).all<{ name_raw: string }>())
-        .results.map((m) => norm(m.name_raw));
-      writes.push(env.DB.prepare("DELETE FROM mentions WHERE review_id = ? AND match IN ('auto','ambiguous','unmatched')").bind(r.id));
-      for (const m of mentions) {
-        if (kept.includes(norm(m.name))) continue;
-        const d = decide(m.name, m.role, rosters.get(r.rooftop_key)!);
-        writes.push(env.DB.prepare(`INSERT INTO mentions (review_id, rooftop_key, review_time, stars, name_raw, role_hint, sentiment, staff_id, match, tagged_by)
-          VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(r.id, r.rooftop_key, r.create_time, r.stars, m.name, m.role, m.sentiment, d.staff_id, d.match, m.site ? "site" : null));
-        found++;
-      }
-      writes.push(env.DB.prepare("UPDATE reviews SET mentions_scanned_at = ? WHERE id = ?").bind(nowIso(), r.id));
-      if (topics) {
-        writes.push(env.DB.prepare("DELETE FROM review_topics WHERE review_id = ?").bind(r.id));
-        for (const [kind, list] of [["theme", got?.themes || []], ["phrase", got?.phrases || []]] as const) {
-          for (const t of list) {
-            writes.push(env.DB.prepare("INSERT INTO review_topics (review_id, rooftop_key, review_time, stars, kind, label, sentiment) VALUES (?,?,?,?,?,?,?)")
-              .bind(r.id, r.rooftop_key, r.create_time, r.stars, kind, t.label, t.sentiment));
-          }
+async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget, notes: string[]): Promise<number> {
+  const maxAge = num(env.MAX_AGE_DAYS, 14);
+  const cutoff = historyCutoff(env);
+  let count = 0;
+  let removedCount = 0;
+  for (const loc of locs) {
+    if (!budget.has(1)) { notes.push(`Skipped ${loc.title} this run to stay under the request limit.`); continue; }
+    try {
+      const firstRun = !loc.newest_seen;
+      let token: string | undefined;
+      let top: string | null = null;
+      for (let p = 0; p < MAX_NEW_PAGES && budget.has(1); p++) {
+        const page = await client.reviewPage(loc.account, loc.name, token);
+        if (!top && page.reviews[0]) top = page.reviews[0].update_time;
+        const fresh = loc.newest_seen ? page.reviews.filter((r) => r.update_time > loc.newest_seen!) : page.reviews;
+        const hist = withinHistory(fresh, cutoff);
+        // A review written before the history cutoff but edited recently is still news: keep it
+        const recentEdits = loc.newest_seen ? fresh.filter((r) => r.create_time < cutoff && r.update_time >= cutoff) : [];
+        // Older reviews we've never stored can only come through here because something changed
+        let newOld: string[] = [];
+        if (recentEdits.length) {
+          const ids = recentEdits.map((r) => r.id);
+          const have = new Set((await env.DB.prepare(`SELECT id FROM reviews WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: string }>()).results.map((r) => r.id));
+          newOld = ids.filter((id) => !have.has(id));
         }
-        writes.push(env.DB.prepare("UPDATE reviews SET topics_scanned_at = ? WHERE id = ?").bind(nowIso(), r.id));
+        count += await savePage(env, [...hist.keep, ...recentEdits], loc, maxAge);
+        if (newOld.length) await flagOldEdits(env, recentEdits.filter((r) => newOld.includes(r.id)), loc, notes);
+        // Anything we have from the stretch this page covers that Google no longer lists was deleted
+        if (p === 0 && !firstRun) {
+          const oldest = page.next && page.reviews.length ? page.reviews[page.reviews.length - 1].update_time : null;
+          removedCount += await reconcile(env, loc, page.reviews, oldest, null, [], cutoff);
+        }
+        const reachedSeen = fresh.length < page.reviews.length;
+        if (firstRun) {
+          // Older pages are history; hand them to the backfill phase unless this page already reached the cutoff
+          if (page.next && !hist.pastCutoff) loc.backfill_token = makeBookmark(page.reviews, page.next);
+          else { loc.backfill_token = null; loc.backfill_done = 1; }
+          break;
+        }
+        if (reachedSeen || !page.next) break;
+        token = page.next;
       }
-      scanned++;
+      if (top && (!loc.newest_seen || top > loc.newest_seen)) loc.newest_seen = top;
+    } catch (e) {
+      if (e instanceof BudgetExhausted) throw e;
+      notes.push(`${loc.title}: ${(e as Error).message}`);
     }
-    await env.DB.batch(writes);
+    await saveLoc(env, loc);
   }
-  const remaining = (await env.DB.prepare(`SELECT COUNT(*) AS n FROM reviews WHERE ${where.join(" AND ")}`).bind(...args).first<{ n: number }>())?.n ?? 0;
-  return { scanned, found, remaining };
+  if (removedCount) notes.push(`${removedCount} recent review${removedCount === 1 ? "" : "s"} no longer on Google, marked as removed.`);
+  return count;
 }
 
-/** Re-run matching for a store after its roster changes. Manual tags are left alone. */
-export async function rematch(env: Env, rooftop: string) {
-  const roster = await rosterFor(env, rooftop);
-  const rows = (await env.DB.prepare("SELECT id, name_raw, role_hint, staff_id, match FROM mentions WHERE rooftop_key = ? AND match IN ('auto','ambiguous','unmatched')")
-    .bind(rooftop).all<any>()).results;
-  const writes = rows.map((m) => {
-    const d = decide(m.name_raw, m.role_hint, roster);
-    return d.staff_id === m.staff_id && d.match === m.match ? null
-      : env.DB.prepare("UPDATE mentions SET staff_id = ?, match = ? WHERE id = ?").bind(d.staff_id, d.match, m.id);
-  }).filter(Boolean) as D1PreparedStatement[];
-  for (let i = 0; i < writes.length; i += 100) await env.DB.batch(writes.slice(i, i + 100));
-  return writes.length;
-}
-
-/** Midnight Eastern time on a date like "2024-01-01", as a UTC ISO string. Returns null if the date is invalid. */
-export function etDayStart(ymd: string): string | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd || "");
-  if (!m) return null;
-  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  const probe = new Date(Date.UTC(y, mo - 1, d));
-  if (probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) return null;
-  for (const off of [4, 5]) {
-    const t = new Date(Date.UTC(y, mo - 1, d, off));
-    const h = Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hourCycle: "h23" }).format(t));
-    if (h === 0) return t.toISOString();
+/** An older review (written before HISTORY_START, so never stored) that the reviewer just changed:
+ *  bring it to the Inbox as Updated, even if our old reply is still attached. Google sometimes refreshes
+ *  many old reviews at once without real changes; more than 5 from one listing in a run is treated as that. */
+async function flagOldEdits(env: Env, items: GReview[], loc: Loc, notes: string[]) {
+  const real = items.filter((g) => {
+    if (!g.reply_text || !g.reply_time) return true;
+    return Date.parse(g.update_time) - Date.parse(g.reply_time) > 86400_000; // changed more than a day after our reply
+  });
+  if (!real.length) return;
+  if (real.length > 5) {
+    notes.push(`${loc.title}: Google refreshed ${real.length} older reviews at once; filed without flagging (likely not edits by reviewers).`);
+    return;
   }
-  return new Date(Date.UTC(y, mo - 1, d, 5)).toISOString();
-}
-
-/** First instant of a calendar month in Eastern time, as a UTC ISO string. "2026-09" -> 2026-09-01T04:00:00.000Z */
-export function etMonthStart(ym: string): string {
-  let [y, m] = ym.split("-").map(Number);
-  if (m > 12) { y += 1; m = 1; }
-  for (const off of [4, 5]) {
-    const d = new Date(Date.UTC(y, m - 1, 1, off));
-    const h = Number(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", hourCycle: "h23" }).format(d));
-    if (h === 0) return d.toISOString();
+  for (const g of real) {
+    try {
+      await env.DB.prepare("UPDATE reviews SET reviewer_updated_at = ?, status = 'new', draft = NULL, route_reason = NULL WHERE id = ?")
+        .bind(nowIso(), g.id).run();
+    } catch {
+      await env.DB.prepare("UPDATE reviews SET status = 'new', draft = NULL, route_reason = NULL WHERE id = ?").bind(g.id).run();
+    }
+    const year = new Date(g.create_time).getFullYear();
+    await logEvent(env, g.id, "agent", "review_updated", `The reviewer updated this review from ${year}`);
   }
-  return new Date(Date.UTC(y, m - 1, 1, 5)).toISOString();
+  updatedNotes.push(real.length);
 }
 
-/** [start, end) for a range of calendar months like "2026-07" to "2026-09". */
-export function monthRange(from: string, to: string): [string, string] | null {
-  if (!/^\d{4}-\d{2}$/.test(from) || !/^\d{4}-\d{2}$/.test(to) || from > to) return null;
-  const [ty, tm] = to.split("-").map(Number);
-  return [etMonthStart(from), etMonthStart(`${ty}-${String(tm + 1).padStart(2, "0")}`)];
+/** The history import's bookmark: how far back this listing has reached, plus Google's page token.
+ *  Stored together in locations.backfill_token as "<oldest date reached>|<token>". */
+function readBookmark(t: string | null): { reached: string; token: string } | null {
+  if (!t) return null;
+  const i = t.indexOf("|");
+  return i > 0 && /^\d{4}-/.test(t) ? { reached: t.slice(0, i), token: t.slice(i + 1) } : { reached: "", token: t };
+}
+function makeBookmark(page: GReview[], next: string | null): string | null {
+  if (!next) return null;
+  const reached = page.length ? page[page.length - 1].update_time : "";
+  return reached ? `${reached}|${next}` : next;
 }
 
-/** Roster lines like "Mike Smith" or "Mike Smith, Mikey, Michael" (nicknames optional).
- *  A second column that names a role ("service", "sales", "advisor") overrides the default role. */
-export function parseRosterLines(text: string, defaultRole: StaffRole): { full_name: string; role: StaffRole; aliases: string }[] {
-  const roleWord = /^(sales|salesperson|sales consultant|finance|f&i|service|service advisor|advisor|technician|tech|parts|other)$/i;
-  return text.split(/\r?\n/).map((line) => line.split(/[,\t]/).map((x) => x.trim()).filter(Boolean)).filter((p) => p.length)
-    .map(([name, ...rest]) => {
-      let role = defaultRole;
-      if (rest.length && roleWord.test(rest[0])) {
-        const w = rest.shift()!;
-        role = /serv|advis|tech|parts/i.test(w) ? "service" : /sale|financ|f&i/i.test(w) ? "sales" : "other";
+/** Last phase: import older history with whatever budget is left, newest first across all listings. */
+async function backfill(env: Env, client: GBPClient, locs: Loc[], budget: Budget, notes: string[]): Promise<number> {
+  const maxAge = num(env.MAX_AGE_DAYS, 14);
+  let pagesLeft = num(env.BACKFILL_PAGES_PER_RUN, 20);
+  const cutoff = historyCutoff(env);
+  let count = 0;
+  let active = locs.filter((l) => !l.backfill_done && l.backfill_token);
+  // Each step takes the next page from the listing that has gone back the least, so every
+  // store's most recent reviews come in first and all stores move back in time together.
+  const reachedOf = (l: Loc) => readBookmark(l.backfill_token)?.reached || "9999"; // unknown = do first
+  while (active.length && pagesLeft > 0 && budget.has(1)) {
+    const loc = active.reduce((a, b) => (reachedOf(b) > reachedOf(a) ? b : a));
+    try {
+      const page = await client.reviewPage(loc.account, loc.name, readBookmark(loc.backfill_token)!.token);
+      const hist = withinHistory(page.reviews, cutoff);
+      count += await savePage(env, hist.keep, loc, maxAge);
+      // Stop at the history cutoff; anything older already in the database stays put
+      loc.backfill_token = hist.pastCutoff ? null : makeBookmark(page.reviews, page.next);
+      if (!loc.backfill_token) loc.backfill_done = 1;
+      pagesLeft--;
+    } catch (e) {
+      if (e instanceof BudgetExhausted) break;
+      notes.push(`${loc.title} history: ${(e as Error).message}`);
+      active = active.filter((l) => l !== loc); // try this listing again next run
+      continue;
+    }
+    await saveLoc(env, loc);
+    if (loc.backfill_done) active = active.filter((l) => l !== loc);
+  }
+  return count;
+}
+
+/** Compares one page from Google with what we have for the same stretch of time.
+ *  Reviews we have with an update time inside (lower, upper] that Google didn't list are marked removed;
+ *  reviews Google lists that we'd marked removed are restored. Returns how many were marked removed. */
+async function reconcile(env: Env, loc: Loc, page: GReview[], lower: string | null, upper: string | null, skip: string[], cutoff: string): Promise<number> {
+  const onPage = new Set(page.map((r) => r.id));
+  // Bring back anything on this page we'd marked removed (it reappeared, or was a false alarm)
+  const back = (await env.DB.prepare(`SELECT id FROM reviews WHERE status = 'removed' AND (route_reason IS NULL OR route_reason NOT LIKE '${HAND_REMOVED}%') AND id IN (${page.map(() => "?").join(",") || "''"})`)
+    .bind(...page.map((r) => r.id)).all<{ id: string }>()).results;
+  if (back.length) {
+    const ids = new Set(back.map((b) => b.id));
+    await savePage(env, page.filter((r) => ids.has(r.id)), { ...loc }, num(env.MAX_AGE_DAYS, 14));
+    for (const b of back) await logEvent(env, b.id, "agent", "restored", "Listed on Google again");
+  }
+  const where = ["location_name = ?", "id LIKE 'accounts/%'", "status != 'removed'", "update_time >= ?"];
+  const args: unknown[] = [loc.name, cutoff];
+  if (lower) { where.push("update_time > ?"); args.push(lower); }
+  if (upper) { where.push("update_time <= ?"); args.push(upper); }
+  const ours = (await env.DB.prepare(`SELECT id FROM reviews WHERE ${where.join(" AND ")}`).bind(...args).all<{ id: string }>()).results;
+  let n = 0;
+  for (const r of ours) {
+    if (onPage.has(r.id) || skip.includes(r.id)) continue;
+    await markRemoved(env, r.id, "agent");
+    n++;
+  }
+  return n;
+}
+
+/** Walks each listing's review pages a few at a time, comparing them with what we have, so reviews
+ *  deleted long after they were posted are caught too. Bookmarks live in the settings table. */
+async function auditSweep(env: Env, client: GBPClient, locs: Loc[], budget: Budget, maxPages: number, notes: string[]) {
+  const done = locs.filter((l) => l.backfill_done);
+  if (!done.length || maxPages <= 0) return;
+  const cutoff = historyCutoff(env);
+  const getSetting = async (k: string) => (await env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(k).first<{ value: string }>())?.value;
+  const setSetting = (k: string, v: string) => env.DB.prepare(`INSERT INTO settings (key, value, updated_by, updated_at) VALUES (?,?, 'agent', ?)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).bind(k, v, nowIso()).run();
+  let start: number;
+  try { start = parseInt((await getSetting("audit:next")) || "0", 10) || 0; } catch { return; } // settings table not set up
+  let removed = 0, pages = 0, i = start;
+  while (pages < maxPages && budget.has(1)) {
+    const loc = done[i % done.length];
+    i++;
+    const key = `audit:${loc.name}`;
+    const cur: { token: string | null; upper: string | null; skip: string[] } = JSON.parse((await getSetting(key)) || '{"token":null,"upper":null,"skip":[]}');
+    const page = await client.reviewPage(loc.account, loc.name, cur.token || undefined);
+    pages++;
+    const last = page.reviews[page.reviews.length - 1];
+    const pastCutoff = !page.next || page.reviews.some((r) => r.update_time < cutoff);
+    const lower = !pastCutoff && last ? last.update_time : null;
+    removed += await reconcile(env, loc, page.reviews, lower, cur.upper, cur.skip, cutoff);
+    if (pastCutoff || !last) await env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(key).run(); // sweep finished; start over next time
+    else await setSetting(key, JSON.stringify({ token: page.next, upper: last.update_time, skip: page.reviews.filter((r) => r.update_time === last.update_time).map((r) => r.id) }));
+    if (i - start >= done.length * 4) break; // safety: don't loop forever on tiny listings
+  }
+  await setSetting("audit:next", String(i % done.length));
+  if (removed) notes.push(`Found ${removed} older review${removed === 1 ? "" : "s"} no longer on Google, marked as removed.`);
+}
+
+/** Keeps Claude's draft as written, so later edits by approvers can be learned from. */
+export async function rememberOriginal(env: Env, id: string, draft: string | null | undefined) {
+  if (!draft) return;
+  try { await env.DB.prepare("UPDATE reviews SET draft_original = ? WHERE id = ?").bind(draft, id).run(); } catch { /* migration 0010 */ }
+}
+
+/** If the posted reply differs from Claude's draft, save the pair for "Suggest updates from our edits". */
+export async function recordEdit(env: Env, r: ReviewRow, finalText: string, editor: string) {
+  try {
+    const row = await env.DB.prepare("SELECT draft_original FROM reviews WHERE id = ?").bind(r.id).first<{ draft_original: string | null }>();
+    const orig = row?.draft_original;
+    const norm = (x: string) => x.replace(/\s+/g, " ").trim();
+    if (!orig || norm(orig) === norm(finalText)) return;
+    await env.DB.prepare("INSERT INTO draft_edits (review_id, rooftop_key, stars, original, final, editor, created_at) VALUES (?,?,?,?,?,?,?)")
+      .bind(r.id, r.rooftop_key, r.stars, orig, finalText, editor, nowIso()).run();
+  } catch { /* migration 0010 */ }
+}
+
+export const HAND_REMOVED = "Marked removed by hand";
+export const isHandRemoved = (reason: string | null | undefined) => !!reason && reason.startsWith(HAND_REMOVED);
+
+/** Marks a review as removed from Google. */
+export async function markRemoved(env: Env, id: string, actor: string) {
+  const reason = `Removed from Google (found ${new Date().toLocaleDateString("en-US", { timeZone: "America/New_York" })})`;
+  try { await env.DB.prepare("UPDATE reviews SET status='removed', route_reason=?, checked_at=? WHERE id=?").bind(reason, nowIso(), id).run(); }
+  catch { await env.DB.prepare("UPDATE reviews SET status='removed', route_reason=? WHERE id=?").bind(reason, id).run(); }
+  await logEvent(env, id, actor, "removed", "No longer on Google: deleted by the reviewer or taken down");
+}
+
+/** Looks up open reviews on Google, least recently checked first, and marks any that are gone. */
+async function verifyStillOnGoogle(env: Env, client: GBPClient, budget: Budget, max: number, notes: string[]) {
+  if (max <= 0) return;
+  let rows: { id: string }[];
+  try {
+    rows = (await env.DB.prepare(
+      `SELECT id FROM reviews WHERE is_sample = 0 AND id LIKE 'accounts/%' AND status != 'removed'
+         AND (escalation_count > 0 OR status IN ('new','pending','ready','approved','error')
+              OR (status = 'old_unanswered' AND create_time >= ?))
+       ORDER BY (escalation_count > 0) DESC, checked_at IS NOT NULL, checked_at ASC LIMIT ?`)
+      .bind(etDayStart(`${new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }).slice(0, 4)}-01-01`), max).all<{ id: string }>()).results;
+  } catch { return; } // migration 0009 not run yet
+  let gone = 0;
+  for (const r of rows) {
+    if (!budget.has(1)) break;
+    try {
+      if (await client.reviewExists(r.id)) await env.DB.prepare("UPDATE reviews SET checked_at=? WHERE id=?").bind(nowIso(), r.id).run();
+      else { await markRemoved(env, r.id, "agent"); gone++; }
+    } catch (e) {
+      if (e instanceof BudgetExhausted) throw e;
+      // a temporary Google error: try this one again another run
+    }
+  }
+  if (gone) notes.push(`${gone} review${gone === 1 ? "" : "s"} no longer on Google, marked as removed.`);
+}
+
+/** Draft one review and save the result. Returns the new status. */
+export async function draftAndRoute(env: Env, r: ReviewRow, actor = "agent", forceReview = false, budget: Budget = unlimited()): Promise<Status> {
+  const x = r as any;
+  const update = x.reviewer_updated_at ? { prevText: x.prev_text || "", prevStars: x.prev_stars || 0, prevReply: r.reply_text || "" } : undefined;
+  const d = await draftReply(env, r.stars, r.text, replyRooftop(x), budget, x.reviewer_name, { update, source: x.source || undefined });
+  // A temporary Claude error during a scheduled or manual run: leave it waiting and try again next run
+  if (!d.ok && d.retryable && actor === "agent") {
+    await env.DB.prepare("UPDATE reviews SET status='new', route_reason=? WHERE id=?")
+      .bind(`Draft will be retried on the next run (${d.risk_flags[0] || "temporary error"})`.slice(0, 300), r.id).run();
+    return "new";
+  }
+  const decision = route(r.stars, r.text, d, num(env.AUTO_POST_MIN_STARS, 4));
+  const status: Status = forceReview || decision.action === "review" ? "pending" : "ready";
+  await env.DB.prepare(
+    `UPDATE reviews SET draft=?, department=?, sentiment=?, risk_level=?, risk_flags=?, route_reason=?, status=? WHERE id=?`
+  ).bind(d.reply || null, d.department, d.sentiment, d.risk_level, JSON.stringify(d.risk_flags), decision.reason, status, r.id).run();
+  await rememberOriginal(env, r.id, d.reply);
+  await logEvent(env, r.id, actor, "drafted", decision.reason);
+  return status;
+}
+
+export async function postReply(env: Env, client: GBPClient | null, r: ReviewRow, text: string, actor: string, source: "agent" | "manager") {
+  if (isApiSource(r.id)) await postExternal(env, r as any, text);
+  else {
+    if (!client) throw new Error("Google isn't connected for this run.");
+    await client.postReply(r.id, text);
+  }
+  const status: Status = source === "agent" ? "auto_posted" : "approved_posted";
+  await env.DB.prepare(`UPDATE reviews SET status=?, reply_text=?, reply_time=?, reply_source=? WHERE id=?`)
+    .bind(status, text, nowIso(), source, r.id).run();
+  await logEvent(env, r.id, actor, "posted", (source === "agent" ? "Auto-posted" : "Posted after approval") + ((r as any).source ? ` to ${(r as any).source}` : ""));
+}
+
+async function inBatches<T>(items: T[], size: number, fn: (t: T) => Promise<void>) {
+  for (let i = 0; i < items.length; i += size) await Promise.all(items.slice(i, i + size).map(fn));
+}
+
+export type RunJob = "google" | "external" | "all";
+
+export async function runAgent(env: Env, trigger: string, job: RunJob = "google"): Promise<RunSummary> {
+  const doGoogle = job !== "external", doExternal = job !== "google";
+  const m = mode(env);
+  const started = nowIso();
+  const s: RunSummary = { mode: m, synced: 0, drafted: 0, posted: 0, flagged: 0, errors: 0, notes: [] };
+  const budget = new Budget(num(env.EXTERNAL_REQUEST_BUDGET, 45));
+  let client: GBPClient | null = null;
+  let locs: Loc[] = [];
+
+  try {
+    // 1a. DealerRater and Cars.com first, so a long Google sync can't use up the run's requests
+    if (doExternal && m !== "dry_run" && externalConfigured(env)) {
+      try { s.synced += await syncExternal(env, budget, s.notes); }
+      catch (e) { if (e instanceof BudgetExhausted) throw e; s.notes.push(`DealerRater/Cars.com: ${(e as Error).message}`); }
+    }
+
+    // 1. New reviews from every store
+    if (doGoogle && m !== "dry_run") {
+      try {
+        client = new GBPClient(env, budget);
+        locs = await loadLocations(env, client);
+        if (!locs.length) {
+          s.notes.push("Google returned no business locations for this sign-in. The refresh token was probably created with a Google account that doesn't manage the Lester Glenn profiles; create it again signed in as the profile owner or manager.");
+        } else {
+          s.notes.push(`Found ${locs.length} Google ${locs.length === 1 ? "location" : "locations"}.`);
+        }
+        updatedNotes.length = 0;
+        s.synced += await syncNew(env, client, locs, budget, s.notes);
+        const upd = updatedNotes.reduce((a, n) => a + n, 0);
+        if (upd) s.notes.push(`${upd} review${upd === 1 ? " was" : "s were"} updated by the reviewer and moved back to the Inbox.`);
+      } catch (e) {
+        if (e instanceof BudgetExhausted) throw e;
+        s.errors++; s.notes.push((e as Error).message);
+        client = null;
       }
-      return { full_name: name.slice(0, 80), role, aliases: rest.join(",").slice(0, 200) };
-    });
-}
+    }
 
-export { BudgetExhausted };
+    if (doGoogle) {
+    // 1b. Make sure reviews that still need attention haven't been deleted on Google
+    if (client && budget.left > 14) {
+      try { await verifyStillOnGoogle(env, client, budget, Math.min(8, budget.left - 14), s.notes); }
+      catch (e) { if (e instanceof BudgetExhausted) throw e; }
+    }
+    }
+
+    // 2. Draft what's waiting, keeping one call in reserve per draft for posting when live
+    const perDraft = m === "live" ? 2 : 1;
+    const sampleClause = m === "dry_run" ? "" : " AND is_sample = 0";
+    const limit = Math.min(num(env.MAX_DRAFTS_PER_RUN, 25), Math.floor(budget.left / perDraft));
+    if (limit > 0) {
+      const waiting = (await env.DB.prepare(`SELECT * FROM reviews WHERE (status='new' OR (status='pending' AND draft IS NULL AND route_reason LIKE 'Drafting problem: Claude API error%'))${sampleClause} ORDER BY create_time DESC LIMIT ?`)
+        .bind(limit).all<ReviewRow>()).results;
+      await inBatches(waiting, 5, async (r) => {
+        const st = await draftAndRoute(env, r, "agent", false, budget);
+        s.drafted++;
+        if (st === "pending") s.flagged++;
+      });
+    }
+
+    if (doGoogle) {
+    // 3. Live: post auto-cleared drafts and anything a manager approved
+    if (m === "live" && client && budget.has(1)) {
+      const toPost = (await env.DB.prepare(
+        `SELECT * FROM reviews WHERE status IN (${autoPost(env) ? "'ready','approved'" : "'approved'"}) AND is_sample=0 AND draft IS NOT NULL AND (reply_text IS NULL OR status = 'approved')
+         ORDER BY status = 'approved' DESC, create_time ASC LIMIT ?`
+      ).bind(Math.min(50, budget.left)).all<ReviewRow>()).results;
+      for (const r of toPost) {
+        try {
+          await postReply(env, client, r, r.draft!, r.decided_by || "agent", r.status === "approved" ? "manager" : "agent");
+          s.posted++;
+        } catch (e) {
+          if (e instanceof BudgetExhausted) throw e;
+          if (e instanceof GBPError && e.status === 404) { await markRemoved(env, r.id, "agent"); continue; }
+          s.errors++;
+          await env.DB.prepare("UPDATE reviews SET status='error', route_reason=? WHERE id=?").bind(`Post failed: ${(e as Error).message}`.slice(0, 500), r.id).run();
+        }
+      }
+    }
+    }
+
+    // 4. Read new reviews for staff names (needs migration 0006; skipped quietly until then)
+    if (budget.has(2)) {
+      try {
+        const sc = await scanReviews(env, budget, { maxBatches: 2 });
+        if (sc.scanned) s.notes.push(`Read ${sc.scanned} reviews for staff names, found ${sc.found}.`);
+        const sk = (sc as any).skipped || 0;
+        if (sk) s.notes.push(sk === 1 ? "1 review couldn't be read for staff names and was skipped." : `${sk} reviews couldn't be read for staff names and were skipped.`);
+      } catch (e) {
+        if (e instanceof BudgetExhausted) throw e;
+        if (!/no such (table|column)/i.test((e as Error).message)) s.notes.push(`Staff names: ${(e as Error).message}`);
+      }
+    }
+
+    if (doGoogle) {
+    // 5. Older history for statistics, using whatever budget is left
+    if (client && locs.length) s.synced += await backfill(env, client, locs, budget, s.notes);
+
+    // 6. Rolling sweep for reviews deleted from older pages, with what's left
+    if (client && locs.length && budget.left > 2) {
+      try { await auditSweep(env, client, locs, budget, Math.min(12, budget.left - 2), s.notes); }
+      catch (e) { if (e instanceof BudgetExhausted) throw e; }
+    }
+    }
+  } catch (e) {
+    if (e instanceof BudgetExhausted) s.notes.push(e.message);
+    else { s.errors++; s.notes.push((e as Error).message); }
+  }
+
+  // The run's work is already saved; recording it must never fail the run
+  const label = job === "external" ? `${trigger} (DealerRater/Cars.com)` : trigger;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await env.DB.prepare(
+    `INSERT INTO runs (started_at, finished_at, mode, trigger, synced, drafted, posted, flagged, errors, notes) VALUES (?,?,?,?,?,?,?,?,?,?)`
+  ).bind(started, nowIso(), m, label, s.synced, s.drafted, s.posted, s.flagged, s.errors, s.notes.join("\n").slice(0, 4000)).run();
+      break;
+    } catch (e) {
+      console.error(`Saving the run record failed (attempt ${attempt}): ${(e as Error).message}`);
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 500 * attempt));
+    }
+  }
+  return s;
+}
