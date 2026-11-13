@@ -204,7 +204,15 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
         const hist = withinHistory(fresh, cutoff);
         // A review written before the history cutoff but edited recently is still news: keep it
         const recentEdits = loc.newest_seen ? fresh.filter((r) => r.create_time < cutoff && r.update_time >= cutoff) : [];
+        // Older reviews we've never stored can only come through here because something changed
+        let newOld: string[] = [];
+        if (recentEdits.length) {
+          const ids = recentEdits.map((r) => r.id);
+          const have = new Set((await env.DB.prepare(`SELECT id FROM reviews WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: string }>()).results.map((r) => r.id));
+          newOld = ids.filter((id) => !have.has(id));
+        }
         count += await savePage(env, [...hist.keep, ...recentEdits], loc, maxAge);
+        if (newOld.length) await flagOldEdits(env, recentEdits.filter((r) => newOld.includes(r.id)), loc, notes);
         // Anything we have from the stretch this page covers that Google no longer lists was deleted
         if (p === 0 && !firstRun) {
           const oldest = page.next && page.reviews.length ? page.reviews[page.reviews.length - 1].update_time : null;
@@ -229,6 +237,32 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
   }
   if (removedCount) notes.push(`${removedCount} recent review${removedCount === 1 ? "" : "s"} no longer on Google, marked as removed.`);
   return count;
+}
+
+/** An older review (written before HISTORY_START, so never stored) that the reviewer just changed:
+ *  bring it to the Inbox as Updated, even if our old reply is still attached. Google sometimes refreshes
+ *  many old reviews at once without real changes; more than 5 from one listing in a run is treated as that. */
+async function flagOldEdits(env: Env, items: GReview[], loc: Loc, notes: string[]) {
+  const real = items.filter((g) => {
+    if (!g.reply_text || !g.reply_time) return true;
+    return Date.parse(g.update_time) - Date.parse(g.reply_time) > 86400_000; // changed more than a day after our reply
+  });
+  if (!real.length) return;
+  if (real.length > 5) {
+    notes.push(`${loc.title}: Google refreshed ${real.length} older reviews at once; filed without flagging (likely not edits by reviewers).`);
+    return;
+  }
+  for (const g of real) {
+    try {
+      await env.DB.prepare("UPDATE reviews SET reviewer_updated_at = ?, status = 'new', draft = NULL, route_reason = NULL WHERE id = ?")
+        .bind(nowIso(), g.id).run();
+    } catch {
+      await env.DB.prepare("UPDATE reviews SET status = 'new', draft = NULL, route_reason = NULL WHERE id = ?").bind(g.id).run();
+    }
+    const year = new Date(g.create_time).getFullYear();
+    await logEvent(env, g.id, "agent", "review_updated", `The reviewer updated this review from ${year}`);
+  }
+  updatedNotes.push(real.length);
 }
 
 /** The history import's bookmark: how far back this listing has reached, plus Google's page token.
@@ -513,6 +547,8 @@ export async function runAgent(env: Env, trigger: string, job: RunJob = "google"
       try {
         const sc = await scanReviews(env, budget, { maxBatches: 2 });
         if (sc.scanned) s.notes.push(`Read ${sc.scanned} reviews for staff names, found ${sc.found}.`);
+        const sk = (sc as any).skipped || 0;
+        if (sk) s.notes.push(sk === 1 ? "1 review couldn't be read for staff names and was skipped." : `${sk} reviews couldn't be read for staff names and were skipped.`);
       } catch (e) {
         if (e instanceof BudgetExhausted) throw e;
         if (!/no such (table|column)/i.test((e as Error).message)) s.notes.push(`Staff names: ${(e as Error).message}`);
