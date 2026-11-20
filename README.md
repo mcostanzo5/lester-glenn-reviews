@@ -410,6 +410,19 @@ directly.
 Each listing is one request per run, so with every store connected, use Workers Paid.
 Statistics still cover Google only.
 
+## Manual log (other review sites)
+
+**Manual Log** in the header records a review from another site without escalating
+it: store, site, star rating, date, reviewer, full review, and the staff involved
+(checked from that store's roster; they count on the Staff tab right away, and names
+in the text are still matched automatically). Then either **Log (already
+responded)**, which files it as responded, or **Log & generate draft**, which writes
+a draft and opens it like any review (notes, redraft, thumbs, copy, then **Mark as
+responded**). Logged reviews waiting on a response show in the Inbox.
+
+**All reviews** has a multi-select **Sites** filter (Google, DealerRater, Cars.com,
+Facebook, Yelp, and the rest, plus Other for anything else).
+
 ## Manual escalations (other review sites)
 
 **Manual Escalation** in the header adds a review from DealerRater, Yelp, Facebook,

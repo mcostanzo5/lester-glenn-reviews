@@ -165,8 +165,7 @@ body.link-mode .detail { position: static; max-width: 760px; margin: 24px auto; 
 .pill.hot { background: var(--red); color: #fff; }
 
 /* Manual escalation and outside reviews */
-.manual-esc { margin-left: auto; background: #fff; color: var(--red); border: 2px solid #fff; font-weight: 700; padding: 6px 12px; }
-.manual-esc::before { content: "!"; font-weight: 800; margin-right: 6px; }
+.manual-esc { margin-left: 8px; background: #fff; color: var(--red); border: 2px solid #fff; font-weight: 700; padding: 6px 12px; }
 .manual-esc:hover { background: var(--red); color: #fff; border-color: #fff; }
 .manual-esc + .who { margin-left: 16px; }
 .pill.source { background: var(--ink); color: var(--panel); margin-left: 6px; }
@@ -275,6 +274,24 @@ tr.clickable:hover td { background: var(--paper); }
 .roster-add { display: grid; gap: 4px; margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
 .roster-add .btn { justify-self: start; }
 .roster-add textarea { border: 1px solid var(--line); border-radius: var(--radius-s); padding: 8px 10px; font-weight: 400; width: 100%; background: var(--panel); }
+
+/* Header buttons: first one pushes right */
+#manualLogBtn { margin-left: auto; }
+#manualLogBtn { color: var(--blue-deep, #0772bc); }
+#manualLogBtn:hover { background: var(--blue-deep, #0772bc); color: #fff; }
+
+/* Manual log: staff picker */
+.staff-pick { border: 1px solid var(--line); border-radius: var(--radius-s); padding: 6px 10px; max-height: 220px; overflow-y: auto; background: var(--panel); }
+.staff-pick .check { display: flex; gap: 8px; align-items: center; padding: 2px 0; font-weight: 400; }
+.staff-role { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 6px 0 2px; }
+
+/* All reviews: sites filter */
+.sites-pick { position: relative; }
+.sites-pick summary { list-style: none; cursor: pointer; border: 1px solid var(--line); border-radius: var(--radius-s); padding: 7px 10px; background: var(--panel); font-size: 14px; white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.sites-pick summary::-webkit-details-marker { display: none; }
+.sites-pick summary::after { content: " \25BE"; color: var(--muted); }
+.sites-menu { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 8px 12px; box-shadow: 0 6px 18px rgba(0,0,0,.12); min-width: 180px; }
+.sites-menu .check { display: flex; gap: 8px; align-items: center; padding: 3px 0; font-weight: 400; white-space: nowrap; }
 
 /* Staff report email */
 .report-dialog { max-width: 760px; width: 94vw; }

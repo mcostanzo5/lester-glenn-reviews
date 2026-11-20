@@ -53,7 +53,7 @@ async function inboxWhere(env: Env): Promise<{ sql: string; args: unknown[] }> {
   const yearStart = etDayStart(`${year}-01-01`)!;
   const escalated = (await hasEscalationCols(env)) ? " OR escalation_open > 0" : "";
   return {
-    sql: `(status IN ('new','pending','ready','approved','error') OR (status = 'old_unanswered' AND (create_time >= ?${escalated}))${escalated ? " OR (status = 'external' AND escalation_open > 0)" : ""})`,
+    sql: `(status IN ('new','pending','ready','approved','error') OR (status = 'old_unanswered' AND (create_time >= ?${escalated}))${(await hasSourceCol(env)) ? " OR status = 'external'" : ""})`,
     args: [yearStart],
   };
 }
@@ -141,6 +141,16 @@ async function listReviews(env: Env, user: User, url: URL) {
   const days2 = dayRange(url.searchParams.get("start") || "", url.searchParams.get("end") || "");
   if (days2.start) { where.push("create_time >= ?"); args.push(days2.start); }
   if (days2.end) { where.push("create_time < ?"); args.push(days2.end); }
+  const sites = (url.searchParams.get("sites") || "").split(",").map((x) => x.trim()).filter(Boolean);
+  if (sites.length && (await hasSourceCol(env))) {
+    const known = ["DealerRater", "Cars.com", ...OUTSIDE_SOURCES];
+    const named = sites.filter((x) => x !== "Google" && x !== "Other");
+    const ors: string[] = [];
+    if (sites.includes("Google")) ors.push("source IS NULL");
+    if (named.length) { ors.push(`source IN (${named.map(() => "?").join(",")})`); args.push(...named); }
+    if (sites.includes("Other")) { ors.push(`(source IS NOT NULL AND source NOT IN (${[...new Set(known)].map(() => "?").join(",")}))`); args.push(...new Set(known)); }
+    if (ors.length) where.push(`(${ors.join(" OR ")})`);
+  }
   const src = url.searchParams.get("source");
   if (src && (await hasSourceCol(env))) where.push(src === "google" ? "source IS NULL" : "source IS NOT NULL");
   const stars = url.searchParams.get("stars");
@@ -292,6 +302,31 @@ async function createManualReview(env: Env, user: User, body: any): Promise<Resp
   const reviewer = String(body?.reviewer_name || "").trim().slice(0, 120);
   if (reviewer) { try { await env.DB.prepare("UPDATE reviews SET reviewer_name = ? WHERE id = ?").bind(reviewer, id).run(); } catch { /* column not added */ } }
   await logEvent(env, id, user.email, "added", `Added by hand from ${source}`);
+
+  // Staff the person picked: tagged right away, like a manual tag on any review
+  const staffIds: number[] = Array.isArray(body?.staff_ids) ? body.staff_ids.map(Number).filter((n: number) => n > 0).slice(0, 20) : [];
+  for (const sid of staffIds) {
+    try {
+      const s = await env.DB.prepare("SELECT * FROM staff WHERE id = ? AND rooftop_key = ?").bind(sid, rooftop).first<Staff>();
+      if (!s) continue;
+      await env.DB.prepare(`INSERT INTO mentions (review_id, rooftop_key, review_time, stars, name_raw, role_hint, sentiment, staff_id, match, tagged_by, tagged_at)
+        VALUES (?,?,?,?,?,?,?,?, 'manual', ?, ?)`).bind(id, rooftop, when, stars, s.full_name, s.role, stars >= 4 ? "positive" : stars && stars <= 2 ? "negative" : "neutral",
+        s.id, user.email, nowIso()).run();
+      await logEvent(env, id, user.email, "staff_tagged", `Added ${s.full_name}`);
+    } catch { /* staff tables not set up */ }
+  }
+
+  if (body?.log === "responded") {
+    await env.DB.prepare("UPDATE reviews SET status='external_done', reply_time=?, reply_source='manager', decided_by=?, decided_at=? WHERE id=?")
+      .bind(nowIso(), user.email, nowIso(), id).run();
+    await logEvent(env, id, user.email, "responded", `Logged as already responded on ${source}`);
+  } else if (body?.log === "draft") {
+    const r = await getReview(env, id);
+    if (r) {
+      const err = await draftWithNotes(env, r, user, false);
+      if (err) return json({ id, draftError: err });
+    }
+  }
   return json({ id });
 }
 

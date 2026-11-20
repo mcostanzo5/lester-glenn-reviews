@@ -101,6 +101,8 @@ async function boot() {
   renderRunStatus();
   const mb = $("#manualEscBtn");
   if (mb && (m.role === "admin" || m.role === "manager")) { mb.hidden = false; mb.onclick = openManualEscalation; }
+  const lb = $("#manualLogBtn");
+  if (lb && (m.role === "admin" || m.role === "manager")) { lb.hidden = false; lb.onclick = () => openManualReview("log"); }
   if (m.role === "admin" || m.role === "manager") setTimeout(checkStaleEscalations, 800);
   const banner = $("#banner");
   if (m.mode === "dry_run") { banner.hidden = false; banner.textContent = "Dry run: showing sample reviews. Nothing is read from or posted to Google."; }
@@ -224,6 +226,10 @@ function filtersHtml() {
     <select id="fDays">${opt("", "Any time", f.days)}${opt("7", "Last 7 days", f.days)}${opt("30", "Last 30 days", f.days)}${opt("90", "Last 90 days", f.days)}${opt("365", "Last 12 months", f.days)}${opt("custom", "Custom range\u2026", f.days)}</select>
     <label class="sr" for="fStars">Rating</label>
     <select id="fStars">${opt("", "Any rating", f.stars)}${opt("low", "3 stars or less", f.stars)}${opt("high", "4 and 5 stars", f.stars)}</select>
+    <details class="sites-pick" id="fSites"><summary>${f.sites ? `Sites: ${esc(f.sites.split(",").join(", "))}` : "All sites"}</summary>
+      <div class="sites-menu">${["Google", "DealerRater", "Cars.com", ...(state.me.sources || []).filter((x) => !["DealerRater", "Cars.com"].includes(x)), "Other"]
+        .map((x) => `<label class="check"><input type="checkbox" value="${esc(x)}" ${(f.sites || "").split(",").includes(x) ? "checked" : ""}> ${esc(x)}</label>`).join("")}
+        <button type="button" class="btn quiet" id="fSitesClear">All sites</button></div></details>
     <label class="sr" for="fQ">Search</label>
     <input type="search" id="fQ" placeholder="Search reviews, replies, and reviewer names" value="${esc(f.q)}">
     ${f.days === "custom" ? `<div class="custom-range">
@@ -241,7 +247,8 @@ function bindFilters() {
     const custom = $("#fDays").value === "custom";
     let start = custom && $("#fStart") ? $("#fStart").value : "", end = custom && $("#fEnd") ? $("#fEnd").value : "";
     if (start && end && start > end) [start, end] = [end, start];
-    state.filters = { status: $("#fStatus").value, stars: $("#fStars").value, q: $("#fQ").value.trim(), days: $("#fDays").value, start, end, source: state.filters.source || "" };
+    const sites = [...document.querySelectorAll("#fSites input:checked")].map((i) => i.value).join(",");
+    state.filters = { status: $("#fStatus").value, stars: $("#fStars").value, q: $("#fQ").value.trim(), days: $("#fDays").value, start, end, source: state.filters.source || "", sites };
     state.page = 0;
     loadList();
   };
@@ -250,6 +257,8 @@ function bindFilters() {
   if ($("#fStart")) { $("#fStart").onchange = apply; $("#fEnd").onchange = apply; }
   if ($("#fClearRange")) $("#fClearRange").onclick = () => { $("#fStart").value = ""; $("#fEnd").value = ""; apply(); };
   $("#fStars").onchange = apply;
+  document.querySelectorAll("#fSites input").forEach((i) => (i.onchange = () => { apply(); setTimeout(() => { const d = $("#fSites"); if (d) d.open = true; }, 0); }));
+  if ($("#fSitesClear")) $("#fSitesClear").onclick = () => { document.querySelectorAll("#fSites input").forEach((i) => (i.checked = false)); apply(); };
   let t;
   $("#fQ").oninput = () => { clearTimeout(t); t = setTimeout(apply, 350); };
 }
@@ -654,7 +663,10 @@ function bindNotes(r) {
 
 /* ---------- Manual escalation (reviews from other sites) ---------- */
 
-function openManualEscalation() {
+function openManualEscalation() { openManualReview("escalate"); }
+
+function openManualReview(mode) {
+  const logMode = mode === "log";
   const stores = state.me.rooftops.filter((x) => x.key !== "other");
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
   const d = $("#detail");
@@ -662,7 +674,7 @@ function openManualEscalation() {
   document.querySelector(".shell").classList.add("with-detail");
   state.selected = null;
   d.innerHTML = `
-    <div class="detail-head"><div><h2>Manual escalation</h2><p class="meta">A review from another site, step 1 of 2</p></div>
+    <div class="detail-head"><div><h2>${logMode ? "Manual log" : "Manual escalation"}</h2><p class="meta">${logMode ? "Record a review from another site" : "A review from another site, step 1 of 2"}</p></div>
       <button class="close" aria-label="Close" onclick="closeDetail()">\u00d7</button></div>
     <label class="field">Store<select id="mStore"><option value="">Pick a store\u2026</option>${stores.map((x) => `<option value="${esc(x.key)}" ${state.rooftop === x.key ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
     <label class="field">Where was it posted?<select id="mSource"><option value="">Pick a site\u2026</option>${(state.me.sources || []).map((x) => `<option>${esc(x)}</option>`).join("")}<option>Other</option></select></label>
@@ -674,9 +686,54 @@ function openManualEscalation() {
     <label class="field">Reviewer name (optional)<input id="mName" autocomplete="off"></label>
     <label class="field">Link to the review (optional)<input id="mUrl" type="url" placeholder="https://"></label>
     <label class="field">Full review<textarea id="mText" rows="8" placeholder="Paste the whole review here"></textarea></label>
-    <div class="actions"><button class="btn primary" id="mNext">Next: escalation details</button><button class="btn quiet" onclick="closeDetail()">Cancel</button></div>
-    <p class="meta">It's added to that store's reviews, then you fill in the escalation email like any other escalation.</p>`;
+    ${logMode ? `<div class="field"><span>Staff involved</span><div id="mStaff" class="staff-pick"><p class="meta">Pick a store to see its staff.</p></div></div>
+    <div class="actions"><button class="btn" id="mLogDone">Log (already responded)</button><button class="btn primary" id="mLogDraft">Log &amp; generate draft</button><button class="btn quiet" onclick="closeDetail()">Cancel</button></div>
+    <p class="meta">It's added to that store's reviews and counts for the staff you check. With a draft, it opens like any review: notes, redraft, copy, then Mark as responded.</p>`
+    : `<div class="actions"><button class="btn primary" id="mNext">Next: escalation details</button><button class="btn quiet" onclick="closeDetail()">Cancel</button></div>
+    <p class="meta">It's added to that store's reviews, then you fill in the escalation email like any other escalation.</p>`}`;
   $("#mSource").onchange = () => { $("#mOtherWrap").hidden = $("#mSource").value !== "Other"; };
+  const gather = () => ({ rooftop: $("#mStore").value, source: $("#mSource").value, source_other: $("#mOther").value, stars: $("#mStars").value,
+    date: $("#mDate").value, reviewer_name: $("#mName").value, url: $("#mUrl").value, text: $("#mText").value });
+  const check = (body) => {
+    if (!body.rooftop) return "Pick a store.";
+    if (!body.source || (body.source === "Other" && !body.source_other.trim())) return "Pick where the review was posted.";
+    if (!body.text.trim()) return "Paste the review text.";
+    return "";
+  };
+  if (logMode) {
+    const loadStaff = async () => {
+      const box = $("#mStaff"), key = $("#mStore").value;
+      if (!key) { box.innerHTML = `<p class="meta">Pick a store to see its staff.</p>`; return; }
+      box.innerHTML = `<p class="meta">Loading\u2026</p>`;
+      try {
+        const r = await api(`/api/staff/roster?rooftop=${encodeURIComponent(key)}`);
+        const people = (r.staff || []).filter((x) => x.active && x.rooftop_key === key);
+        box.innerHTML = people.length ? ["sales", "service", "other"].map((role) => {
+          const list = people.filter((x) => x.role === role);
+          return list.length ? `<p class="staff-role">${ROLE_LABEL[role]}</p>${list.map((x) => `<label class="check"><input type="checkbox" value="${x.id}"> ${esc(x.full_name)}</label>`).join("")}` : "";
+        }).join("") : `<p class="meta">No roster for this store yet (Staff tab). Names in the review text are still matched automatically.</p>`;
+      } catch { box.innerHTML = `<p class="meta">Couldn't load the roster.</p>`; }
+    };
+    $("#mStore").addEventListener("change", loadStaff);
+    loadStaff();
+    const submit = async (log, btn) => {
+      const body = gather(); const msg = check(body);
+      if (msg) return toast(msg, true);
+      body.log = log;
+      body.staff_ids = [...$("#mStaff").querySelectorAll("input:checked")].map((i) => +i.value);
+      btn.disabled = true; if (log === "draft") btn.textContent = "Writing the draft\u2026";
+      try {
+        const r = await api("/api/reviews", { method: "POST", body });
+        refreshCounts();
+        toast(log === "draft" ? (r.draftError ? r.draftError : "Logged, and the draft is ready.") : "Logged as responded.", !!r.draftError);
+        if (log === "draft") await openDetail(r.id); else closeDetail();
+        if (state.view === "all" || state.view === "inbox") loadList();
+      } catch (err) { toast(err.message, true); btn.disabled = false; btn.textContent = log === "draft" ? "Log & generate draft" : "Log (already responded)"; }
+    };
+    $("#mLogDone").onclick = (e) => submit("responded", e.target);
+    $("#mLogDraft").onclick = (e) => submit("draft", e.target);
+    return;
+  }
   $("#mNext").onclick = async (e) => {
     const body = { rooftop: $("#mStore").value, source: $("#mSource").value, source_other: $("#mOther").value, stars: $("#mStars").value,
       date: $("#mDate").value, reviewer_name: $("#mName").value, url: $("#mUrl").value, text: $("#mText").value };
