@@ -1015,7 +1015,7 @@ async function renderStaff() {
       <td class="num">${p.avg_stars ?? "\u2013"}</td>
       <td class="num site-col">${p.on_google || 0}</td><td class="num site-col">${p.on_dealerrater || 0}</td><td class="num site-col">${p.on_cars || 0}</td><td class="num site-col">${p.on_other || 0}</td></tr>`).join("");
   const tally = `<div class="panel"><div class="panel-head"><h3>Reviews per person, ${esc(label)}</h3>
-      ${t.people.length ? `<button class="btn" id="csvBtn">Download CSV</button>` : ""}</div>
+      ${t.people.length ? `<div class="head-actions">${state.me.role === "admin" || state.me.role === "manager" ? `<button class="btn primary" id="emailReportBtn">Email to managers</button>` : ""}<button class="btn" id="csvBtn">Download CSV</button></div>` : ""}</div>
     <p class="note">Each review counts once per person it names or tags. <b>Reviews</b> is the total across every site, then split by site. DealerRater and Cars.com employee tags count automatically. Click a name to see the reviews.</p>
     ${t.people.length ? `<div class="table-wrap"><table><thead><tr><th>Name</th><th>Store</th><th>Role</th><th class="num">Reviews</th>
       <th class="num">4\u20135 \u2605</th><th class="num">3 \u2605</th><th class="num">1\u20132 \u2605</th><th class="num">Avg</th>
@@ -1035,6 +1035,7 @@ async function renderStaff() {
   bind();
   if ($("#scanBtn")) $("#scanBtn").onclick = (e) => scanMonths(f, e.target);
   if ($("#csvBtn")) $("#csvBtn").onclick = () => downloadCsv(t.people, label);
+  if ($("#emailReportBtn")) $("#emailReportBtn").onclick = () => openStaffEmail(f, label);
   v.querySelectorAll("tr[data-person]").forEach((tr) => (tr.onclick = () => drillPerson(t.people.find((p) => p.id === +tr.dataset.person), f)));
   if ($("#tagBtn")) $("#tagBtn").onclick = () => renderTagList(f, roster.staff);
   if (t.canTag) bindRoster(roster.staff);
@@ -1157,6 +1158,62 @@ function bindRoster() {
     try { await api("/api/staff/roster", { method: "POST", body: { op: "delete", id: +tr.dataset.staff } }); toast("Removed"); renderStaff(); }
     catch (err) { toast(err.message, true); }
   }));
+}
+
+/* ---------- Email the staff report to each store's team ---------- */
+
+async function openStaffEmail(f, label) {
+  const roleText = f.role === "sales" ? "the sales team" : f.role === "service" ? "the service team" : "the sales and service teams";
+  const dlg = document.createElement("dialog");
+  dlg.className = "outcome-dialog report-dialog";
+  dlg.innerHTML = `<h3>Email staff report: ${esc(label)}</h3>
+    <p class="meta">Each store's report goes to ${roleText} on that store's escalation list (Settings > Escalation teams). You can change the recipients below.
+      It includes a totals table, each person's reviewers by site, and two spreadsheets. Sent from your mailbox.</p>
+    <label class="field">Note (optional, appears at the top of every email)<textarea id="repNote" rows="2" placeholder="For example: Great month, keep asking happy customers to mention you by name."></textarea></label>
+    <div id="repStores"><p class="meta">Building the reports\u2026</p></div>
+    <div id="repOut"></div>
+    <div class="actions"><button class="btn primary" id="repSend" disabled>Send</button><button class="btn quiet" id="repClose">Cancel</button></div>`;
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  const close = () => { dlg.close(); dlg.remove(); };
+  $("#repClose").onclick = close;
+  dlg.addEventListener("cancel", () => dlg.remove());
+  const req = { from: f.from, to: f.to, role: f.role, label, rooftop: state.rooftop || "" };
+  let data;
+  try { data = await api("/api/staff/report", { method: "POST", body: { ...req, preview: true } }); }
+  catch (err) { $("#repStores").innerHTML = `<p class="late">${esc(err.message)}</p>`; return; }
+  if (!data.stores.length) { $("#repStores").innerHTML = `<p class="meta">No one was named in reviews for this selection, so there's nothing to send.</p>`; return; }
+  $("#repStores").innerHTML = `${data.canSend ? "" : `<p class="late">Before you can send, <a href="/logout">sign out</a> and sign back in once so Microsoft lets this app send from your mailbox.</p>`}
+    <ol class="rep-list">${data.stores.map((st, i) => `<li>
+      <label class="check"><input type="checkbox" data-store="${i}" ${st.recipients.length ? "checked" : ""}> <b>${esc(st.name)}</b>
+        <span class="meta">${st.people} ${st.people === 1 ? "person" : "people"}, ${st.reviews} review${st.reviews === 1 ? "" : "s"}</span></label>
+      <input class="rep-to" data-to="${i}" value="${esc(st.recipients.join(", "))}" placeholder="No team list for this store yet: add email addresses">
+      <button class="link-btn" data-preview="${i}">Preview</button>
+      <iframe class="email-preview rep-preview" data-frame="${i}" hidden title="Preview for ${esc(st.name)}"></iframe></li>`).join("")}</ol>`;
+  dlg.querySelectorAll("[data-preview]").forEach((b) => (b.onclick = () => {
+    const fr = dlg.querySelector(`[data-frame="${b.dataset.preview}"]`);
+    fr.hidden = !fr.hidden;
+    if (!fr.hidden) {
+      const st = data.stores[+b.dataset.preview];
+      fr.srcdoc = st.html;
+      b.textContent = "Hide preview";
+    } else b.textContent = "Preview";
+  }));
+  const send = $("#repSend");
+  send.disabled = !data.canSend;
+  send.onclick = async () => {
+    const picks = data.stores.map((st, i) => ({ rooftop: st.rooftop, recipients: dlg.querySelector(`[data-to="${i}"]`).value, on: dlg.querySelector(`[data-store="${i}"]`).checked }))
+      .filter((x) => x.on);
+    if (!picks.length) return toast("Check at least one store.", true);
+    if (picks.some((x) => !x.recipients.trim())) return toast("Add recipients for every checked store, or uncheck it.", true);
+    send.disabled = true; send.textContent = "Sending\u2026";
+    try {
+      const r = await api("/api/staff/report", { method: "POST", body: { ...req, note: $("#repNote").value, send: picks } });
+      $("#repOut").innerHTML = `<ul class="${r.sent === picks.length ? "test-ok" : "test-bad"}">${r.results.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>`;
+      toast(`Sent ${r.sent} of ${picks.length} report${picks.length === 1 ? "" : "s"}`, r.sent !== picks.length);
+      send.textContent = "Sent"; $("#repClose").textContent = "Close";
+    } catch (err) { toast(err.message, true); send.disabled = false; send.textContent = "Send"; }
+  };
 }
 
 /* ---------- Topics ---------- */

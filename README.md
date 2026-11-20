@@ -234,6 +234,18 @@ also caps CPU time at 10 ms per run, which heavy history-import runs can brush
 against (check the Worker's Metrics page for "Exceeded CPU" errors), and on paid
 you can set `EXTERNAL_REQUEST_BUDGET = "900"` so history imports in one run.
 
+## Emailing staff reports
+
+On the Staff tab, **Email to managers** sends each store's report for the selected
+months to that store's escalation teams (Settings > Escalation teams): **Sales**
+goes to the sales team, **Service** to the service team, and **Sales and service**
+or **Other** to both. Recipients can be changed before sending, and each store's
+email can be previewed. The email has a totals table (total and per site), then
+each person's reviewers grouped by site (Google, DealerRater, Cars.com), newest
+first, with negatives in red. Two spreadsheets are attached: totals, and every
+review behind them. It's sent from the sender's own mailbox, so it needs the same
+Mail.Send permission as escalations.
+
 ## Topics and word clouds
 
 When reviews are read for staff names, Claude also tags each one with themes
@@ -310,9 +322,17 @@ drafts a reply to the review as it reads now; **Approve and replace reply**
 replaces the old reply on Google. Behind-the-scenes Google updates with no real
 change are ignored.
 
+Reviews written before `HISTORY_START` aren't stored, so there's nothing to compare
+when one is edited. When such a review comes through because Google says it just
+changed, and the change is more than a day after any reply, it's treated as
+Updated by the reviewer. If more than 5 older reviews from one listing come through
+in the same run, that's treated as a Google-side refresh: they're filed without
+flagging, and the run notes say so.
+
 ## Run schedule and ignored listings
 
-Runs are staggered so none gets too long: on the hour (8, 12, 4, 8 Eastern) the
+Google listings are checked in rotation, so if a run runs short of requests, the
+listings it skipped go first next run. Runs are staggered so none gets too long: on the hour (8, 12, 4, 8 Eastern) the
 agent checks Google; at :30 it checks DealerRater and Cars.com. Both draft whatever
 is new. **Run agent now** does the Google run; **Settings > DealerRater and
 Cars.com > Check DealerRater & Cars.com now** does the other. If saving a run's

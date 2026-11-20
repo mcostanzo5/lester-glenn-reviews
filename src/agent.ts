@@ -191,8 +191,19 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
   const cutoff = historyCutoff(env);
   let count = 0;
   let removedCount = 0;
-  for (const loc of locs) {
-    if (!budget.has(1)) { notes.push(`Skipped ${loc.title} this run to stay under the request limit.`); continue; }
+  // Start where the last run stopped, so when requests run short it isn't always the same listings that wait
+  let start = 0;
+  try { start = parseInt((await env.DB.prepare("SELECT value FROM settings WHERE key = 'google:next'").first<{ value: string }>())?.value || "0", 10) || 0; } catch { /* settings table missing */ }
+  start = locs.length ? start % locs.length : 0;
+  const ordered = [...locs.slice(start), ...locs.slice(0, start)];
+  let firstSkipped = -1;
+  const skippedNames: string[] = [];
+  for (const [n, loc] of ordered.entries()) {
+    if (!budget.has(1)) {
+      if (firstSkipped < 0) firstSkipped = (start + n) % locs.length;
+      skippedNames.push(loc.title);
+      continue;
+    }
     try {
       const firstRun = !loc.newest_seen;
       let token: string | undefined;
@@ -236,6 +247,11 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
     await saveLoc(env, loc);
   }
   if (removedCount) notes.push(`${removedCount} recent review${removedCount === 1 ? "" : "s"} no longer on Google, marked as removed.`);
+  if (skippedNames.length) notes.push(`Ran short of requests: ${skippedNames.length} Google listing${skippedNames.length === 1 ? "" : "s"} (${skippedNames.slice(0, 6).join(", ")}${skippedNames.length > 6 ? ", ..." : ""}) will be checked first next run.`);
+  try {
+    await env.DB.prepare(`INSERT INTO settings (key, value, updated_by, updated_at) VALUES ('google:next', ?, 'agent', ?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).bind(String(firstSkipped < 0 ? 0 : firstSkipped), nowIso()).run();
+  } catch { /* settings table missing */ }
   return count;
 }
 

@@ -276,6 +276,14 @@ tr.clickable:hover td { background: var(--paper); }
 .roster-add .btn { justify-self: start; }
 .roster-add textarea { border: 1px solid var(--line); border-radius: var(--radius-s); padding: 8px 10px; font-weight: 400; width: 100%; background: var(--panel); }
 
+/* Staff report email */
+.report-dialog { max-width: 760px; width: 94vw; }
+.rep-list { list-style: none; padding: 0; margin: 8px 0; max-height: 52vh; overflow-y: auto; }
+.rep-list li { border-bottom: 1px solid var(--line); padding: 8px 0; }
+.rep-to { width: 100%; margin: 6px 0 4px; border: 1px solid var(--line); border-radius: var(--radius-s); padding: 6px 8px; font: inherit; font-size: 14px; background: var(--panel); color: var(--ink); }
+.rep-preview { width: 100%; height: 420px; border: 1px solid var(--line); border-radius: var(--radius-s); margin-top: 6px; background: #fff; }
+.head-actions { display: flex; gap: 8px; }
+
 /* Per-site columns and totals */
 .site-col { color: var(--muted); }
 th.site-col { border-left: 1px solid var(--line); }

@@ -150,7 +150,16 @@ async function accessTokenFor(env: Env, email: string): Promise<string> {
   return data.access_token;
 }
 
-export interface Outgoing { to: string[]; subject: string; html: string }
+export interface Attachment { name: string; contentType: string; text: string }
+export interface Outgoing { to: string[]; subject: string; html: string; attachments?: Attachment[] }
+
+/** Text file contents as base64 for Microsoft Graph (UTF-8 safe). */
+function toBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
 
 /** Sends as the signed-in person, from their own mailbox. */
 export async function sendAs(env: Env, email: string, m: Outgoing): Promise<void> {
@@ -163,6 +172,9 @@ export async function sendAs(env: Env, email: string, m: Outgoing): Promise<void
         subject: m.subject,
         body: { contentType: "HTML", content: m.html },
         toRecipients: m.to.map((a) => ({ emailAddress: { address: a } })),
+        ...(m.attachments?.length ? { attachments: m.attachments.map((a) => ({
+          "@odata.type": "#microsoft.graph.fileAttachment", name: a.name, contentType: a.contentType, contentBytes: toBase64(a.text),
+        })) } : {}),
       },
       saveToSentItems: true,
     }),

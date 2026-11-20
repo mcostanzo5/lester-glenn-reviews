@@ -16,7 +16,8 @@ import { Budget } from "./budget";
 import { canTag, etDayStart, monthRange, norm, parseRosterLines, rematch, scanReviews, type Staff } from "./staff";
 import { draftReply } from "./drafter";
 import { matchRooftop, replyRooftop, rooftopFor } from "./rooftops";
-import { allowedDomains, canSendAs, decryptText, encryptText, checkAddresses, mailConfigured, MailError } from "./mail";
+import { allowedDomains, canSendAs, decryptText, encryptText, checkAddresses, mailConfigured, MailError, sendAs } from "./mail";
+import { defaultRecipients, reportCsvs, reportEmail, storeReport, type ReportRole } from "./staffreport";
 
 const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external','external_done')";
 const OPEN_SQL = "('new','pending','ready','approved','error','old_unanswered','external')";
@@ -804,6 +805,59 @@ async function staffApi(env: Env, user: User, req: Request, path: string, url: U
   const sc = scope(user, env, url.searchParams.get("rooftop") || body?.rooftop || null);
   try { await env.DB.prepare("SELECT 1 FROM staff LIMIT 1").first(); }
   catch { return json({ ready: false }); }
+
+  // Email the staff report to each store's escalation team(s)
+  if (path === "/api/staff/report" && req.method === "POST") {
+    if (user.role !== "admin" && user.role !== "manager") return fail("Only admins and managers can email staff reports.", 403);
+    const range = monthRange(String(body?.from || ""), String(body?.to || ""));
+    if (!range) return fail("Pick a valid month range.");
+    const role = (["sales", "service", "other"].includes(body?.role) ? body.role : "") as ReportRole;
+    const label = String(body?.label || "").slice(0, 60);
+    const note = String(body?.note || "").replace(/\s*\u2014\s*/g, ", ").trim().slice(0, 2000);
+    const dashboard = new URL(req.url).origin;
+    const keys = body?.rooftop ? [String(body.rooftop)] : ROOFTOPS.map((r) => r.key);
+    const stores = keys.filter((k) => canAct(user, k));
+    if (body?.preview) {
+      const out = [];
+      for (const k of stores) {
+        const people = await storeReport(env, k, role, range);
+        if (!people.length) continue;
+        const name = rooftopFor(k).name;
+        const m = reportEmail(name, role, label, people, note, user.name || user.email, dashboard);
+        out.push({ rooftop: k, name, people: people.length, reviews: people.reduce((a, p) => a + p.reviews, 0),
+          recipients: await defaultRecipients(env, k, role), subject: m.subject, html: m.html });
+      }
+      return json({ stores: out, canSend: await canSendAs(env, user.email) });
+    }
+    if (!(await canSendAs(env, user.email))) return fail("Before you can send, sign out and sign back in once so Microsoft lets this app send from your mailbox.", 403);
+    const picks: { rooftop: string; recipients: unknown }[] = Array.isArray(body?.send) ? body.send : [];
+    const results: string[] = [];
+    let sent = 0;
+    for (const pick of picks) {
+      const k = String(pick.rooftop || "");
+      if (!stores.includes(k)) continue;
+      const { ok, bad } = checkAddresses(env, pick.recipients);
+      const name = rooftopFor(k).name;
+      if (bad.length) { results.push(`${name}: not sent, these addresses aren't allowed: ${bad.join(", ")}`); continue; }
+      if (!ok.length) { results.push(`${name}: not sent, no recipients.`); continue; }
+      const people = await storeReport(env, k, role, range);
+      if (!people.length) { results.push(`${name}: nothing to report.`); continue; }
+      const m = reportEmail(name, role, label, people, note, user.name || user.email, dashboard);
+      const csv = reportCsvs(name, people);
+      const slug = `${name}-${label}`.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase();
+      try {
+        await sendAs(env, user.email, { to: ok, subject: m.subject, html: m.html, attachments: [
+          { name: `staff-totals-${slug}.csv`, contentType: "text/csv", text: csv.totals },
+          { name: `staff-reviews-${slug}.csv`, contentType: "text/csv", text: csv.details },
+        ] });
+        sent++;
+        results.push(`${name}: sent to ${ok.join(", ")}.`);
+      } catch (e) {
+        results.push(`${name}: ${(e as Error).message}`);
+      }
+    }
+    return json({ sent, results });
+  }
 
   // Tally for a range of calendar months
   if (path === "/api/staff/tally" && req.method === "GET") {
