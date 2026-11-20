@@ -486,7 +486,7 @@ function renderDetail(data) {
 }
 
 function eventLabel(a) {
-  return { drafted: "Drafted", edited: "Edited", approved: "Approved", posted: "Posted", dismissed: "Dismissed", reopened: "Reopened",
+  return { reply_missing: "Reply missing on Google", drafted: "Drafted", edited: "Edited", approved: "Approved", posted: "Posted", dismissed: "Dismissed", reopened: "Reopened",
     escalated: "Emailed the team", escalation_resolved: "Marked resolved", staff_tagged: "Staff tag",
     thumbs_up: "\ud83d\udc4d Thumbs up", thumbs_down: "\ud83d\udc4e Thumbs down",
     added: "Added", responded: "Marked responded", note_added: "Added a note", note_removed: "Removed a note",
@@ -1575,7 +1575,8 @@ async function renderSettings() {
   v.innerHTML = `<div class="settings-grid">
     <div class="panel"><h3>Agent</h3><p>${modeText}</p>
       <p class="note">To change modes, edit <code>AGENT_MODE</code> in wrangler.toml and deploy again.</p>
-      <div class="actions"><button class="btn primary" id="runNow">Run agent now</button>
+      <div class="actions">${state.rooftop && state.rooftop !== "group" ? `<button class="btn primary" id="runStore">Run for ${esc(storeName(state.rooftop).replace(/^Lester Glenn /, ""))}</button>` : ""}
+        <button class="btn ${state.rooftop && state.rooftop !== "group" ? "" : "primary"}" id="runNow">Run all stores</button>
       ${m === "dry_run" ? `<button class="btn" id="loadSamples">Load sample data</button>` : ""}
       <button class="btn quiet danger" id="clearSamples">Clear sample data</button></div>
       <p class="meta" id="runResult"></p></div>
@@ -1632,12 +1633,25 @@ async function renderSettings() {
     catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = "Back up now"; }
   };
   $("#runNow").onclick = async (e) => {
-    const b = e.target; b.disabled = true; b.textContent = "Running\u2026";
+    const b = e.target; b.disabled = true; b.textContent = "Checking Google\u2026";
     try {
-      const r = await api("/api/admin/run", { method: "POST" });
-      toast(`Run finished: ${r.synced} synced, ${r.drafted} drafted, ${r.flagged} flagged, ${r.posted} posted`);
+      // Two shorter runs instead of one long one: Google, then DealerRater and Cars.com
+      const g = await api("/api/admin/run", { method: "POST", body: { job: "google" } });
+      let x = { synced: 0, drafted: 0 };
+      if (state.me.carsConfigured !== false) { b.textContent = "Checking DealerRater and Cars.com\u2026"; x = await api("/api/admin/run", { method: "POST", body: { job: "external" } }); }
+      toast(`Run finished: ${g.synced + x.synced} synced, ${g.drafted + x.drafted} drafted, ${g.flagged} flagged, ${g.posted} posted`);
       await refreshCounts(); renderSettings();
-    } catch (err) { toast(err.message, true); b.disabled = false; b.textContent = "Run agent now"; }
+    } catch (err) { toast(err.message, true); b.disabled = false; b.textContent = "Run all stores"; }
+  };
+  if ($("#runStore")) $("#runStore").onclick = async (e) => {
+    const b = e.target, name = storeName(state.rooftop);
+    b.disabled = true; b.textContent = `Checking ${name.replace(/^Lester Glenn /, "")}\u2026`;
+    try {
+      const r = await api("/api/admin/run", { method: "POST", body: { job: "all", rooftop: state.rooftop } });
+      const found = (r.notes || []).find((n) => n.startsWith("Deep check"));
+      toast(`${name}: ${r.synced} synced, ${r.drafted} drafted${found ? ". " + found : ""}`);
+      await refreshCounts(); renderSettings();
+    } catch (err) { toast(err.message, true); b.disabled = false; b.textContent = `Run for ${name.replace(/^Lester Glenn /, "")}`; }
   };
   const samples = async (action, b) => {
     if (action === "clear" && !confirm("Remove all sample reviews? Real reviews are not affected.")) return;

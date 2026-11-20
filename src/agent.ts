@@ -186,14 +186,16 @@ function withinHistory(reviews: GReview[], cutoff: string) {
   };
 }
 
-async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget, notes: string[]): Promise<number> {
+async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget, notes: string[], deep = false): Promise<number> {
+  let recovered = 0;
+  let lostCount = 0;
   const maxAge = num(env.MAX_AGE_DAYS, 14);
   const cutoff = historyCutoff(env);
   let count = 0;
   let removedCount = 0;
   // Start where the last run stopped, so when requests run short it isn't always the same listings that wait
   let start = 0;
-  try { start = parseInt((await env.DB.prepare("SELECT value FROM settings WHERE key = 'google:next'").first<{ value: string }>())?.value || "0", 10) || 0; } catch { /* settings table missing */ }
+  if (!deep) try { start = parseInt((await env.DB.prepare("SELECT value FROM settings WHERE key = 'google:next'").first<{ value: string }>())?.value || "0", 10) || 0; } catch { /* settings table missing */ }
   start = locs.length ? start % locs.length : 0;
   const ordered = [...locs.slice(start), ...locs.slice(0, start)];
   let firstSkipped = -1;
@@ -208,7 +210,7 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
       const firstRun = !loc.newest_seen;
       let token: string | undefined;
       let top: string | null = null;
-      for (let p = 0; p < MAX_NEW_PAGES && budget.has(1); p++) {
+      for (let p = 0; p < (deep ? 8 : MAX_NEW_PAGES) && budget.has(1); p++) {
         const page = await client.reviewPage(loc.account, loc.name, token);
         if (!top && page.reviews[0]) top = page.reviews[0].update_time;
         const fresh = loc.newest_seen ? page.reviews.filter((r) => r.update_time > loc.newest_seen!) : page.reviews;
@@ -222,7 +224,33 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
           const have = new Set((await env.DB.prepare(`SELECT id FROM reviews WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: string }>()).results.map((r) => r.id));
           newOld = ids.filter((id) => !have.has(id));
         }
-        count += await savePage(env, [...hist.keep, ...recentEdits], loc, maxAge);
+        // Deep check (every run, no extra requests): also save anything on the newest page we don't have,
+        // even if it's older than this listing's bookmark (Google listed it late, or the listing was skipped)
+        let extra: GReview[] = [];
+        if ((p === 0 || deep) && loc.newest_seen) {
+          const freshIds = new Set(fresh.map((r) => r.id));
+          const cand = page.reviews.filter((r) => !freshIds.has(r.id) && r.create_time >= cutoff);
+          if (cand.length) {
+            const have = new Set((await env.DB.prepare(`SELECT id FROM reviews WHERE id IN (${cand.map(() => "?").join(",")})`).bind(...cand.map((r) => r.id)).all<{ id: string }>()).results.map((r) => r.id));
+            extra = cand.filter((r) => !have.has(r.id));
+            recovered += extra.length;
+          }
+        }
+        const noReply = page.reviews.filter((r) => !r.reply_text).map((r) => r.id);
+        let lostReplies: string[] = [];
+        if (noReply.length) {
+          const hourAgo = new Date(Date.now() - 3600_000).toISOString();
+          lostReplies = (await env.DB.prepare(`SELECT id FROM reviews WHERE id IN (${noReply.map(() => "?").join(",")})
+              AND status IN ('approved_posted','auto_posted') AND COALESCE(reply_time, decided_at, '') < ?`)
+            .bind(...noReply, hourAgo).all<{ id: string }>()).results.map((r) => r.id);
+        }
+        count += await savePage(env, [...hist.keep, ...recentEdits, ...extra], loc, maxAge);
+        for (const id of lostReplies) {
+          await env.DB.prepare("UPDATE reviews SET status = 'error', route_reason = ? WHERE id = ?")
+            .bind("Our reply isn't showing on Google. Google may have removed or not accepted it, or it was deleted in Business Profile. Check the wording and approve again to repost.", id).run();
+          await logEvent(env, id, "agent", "reply_missing", "Our posted reply isn't showing on Google");
+          lostCount++;
+        }
         if (newOld.length) await flagOldEdits(env, recentEdits.filter((r) => newOld.includes(r.id)), loc, notes);
         // Anything we have from the stretch this page covers that Google no longer lists was deleted
         if (p === 0 && !firstRun) {
@@ -236,7 +264,10 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
           else { loc.backfill_token = null; loc.backfill_done = 1; }
           break;
         }
-        if (reachedSeen || !page.next) break;
+        if (!page.next) break;
+        const oldestHere = page.reviews.length ? page.reviews[page.reviews.length - 1].update_time : "";
+        const keepDigging = deep && p < 7 && oldestHere >= new Date(Date.now() - 90 * 86400_000).toISOString();
+        if (reachedSeen && !keepDigging) break;
         token = page.next;
       }
       if (top && (!loc.newest_seen || top > loc.newest_seen)) loc.newest_seen = top;
@@ -247,8 +278,10 @@ async function syncNew(env: Env, client: GBPClient, locs: Loc[], budget: Budget,
     await saveLoc(env, loc);
   }
   if (removedCount) notes.push(`${removedCount} recent review${removedCount === 1 ? "" : "s"} no longer on Google, marked as removed.`);
+  if (lostCount) notes.push(`${lostCount} reply${lostCount === 1 ? "" : "s"} we posted ${lostCount === 1 ? "isn't" : "aren't"} showing on Google; moved back to the Inbox as Post failed.`);
+  if (recovered) notes.push(`Deep check found ${recovered} review${recovered === 1 ? "" : "s"} that hadn't come in before.`);
   if (skippedNames.length) notes.push(`Ran short of requests: ${skippedNames.length} Google listing${skippedNames.length === 1 ? "" : "s"} (${skippedNames.slice(0, 6).join(", ")}${skippedNames.length > 6 ? ", ..." : ""}) will be checked first next run.`);
-  try {
+  if (!deep) try {
     await env.DB.prepare(`INSERT INTO settings (key, value, updated_by, updated_at) VALUES ('google:next', ?, 'agent', ?)
       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).bind(String(firstSkipped < 0 ? 0 : firstSkipped), nowIso()).run();
   } catch { /* settings table missing */ }
@@ -478,7 +511,9 @@ async function inBatches<T>(items: T[], size: number, fn: (t: T) => Promise<void
 
 export type RunJob = "google" | "external" | "all";
 
-export async function runAgent(env: Env, trigger: string, job: RunJob = "google"): Promise<RunSummary> {
+export async function runAgent(env: Env, trigger: string, job: RunJob = "google", store?: string): Promise<RunSummary> {
+  // One store's listings only (Auto Group or no store means everything)
+  const only = store && store !== "group" ? store : undefined;
   const doGoogle = job !== "external", doExternal = job !== "google";
   const m = mode(env);
   const started = nowIso();
@@ -490,7 +525,7 @@ export async function runAgent(env: Env, trigger: string, job: RunJob = "google"
   try {
     // 1a. DealerRater and Cars.com first, so a long Google sync can't use up the run's requests
     if (doExternal && m !== "dry_run" && externalConfigured(env)) {
-      try { s.synced += await syncExternal(env, budget, s.notes); }
+      try { s.synced += await syncExternal(env, budget, s.notes, only); }
       catch (e) { if (e instanceof BudgetExhausted) throw e; s.notes.push(`DealerRater/Cars.com: ${(e as Error).message}`); }
     }
 
@@ -499,13 +534,14 @@ export async function runAgent(env: Env, trigger: string, job: RunJob = "google"
       try {
         client = new GBPClient(env, budget);
         locs = await loadLocations(env, client);
+        if (only) locs = locs.filter((l) => l.rooftop_key === only);
         if (!locs.length) {
           s.notes.push("Google returned no business locations for this sign-in. The refresh token was probably created with a Google account that doesn't manage the Lester Glenn profiles; create it again signed in as the profile owner or manager.");
         } else {
-          s.notes.push(`Found ${locs.length} Google ${locs.length === 1 ? "location" : "locations"}.`);
+          s.notes.push(`Found ${locs.length} Google ${locs.length === 1 ? "location" : "locations"}${only ? ` for ${rooftopFor(only).name}` : ""}.`);
         }
         updatedNotes.length = 0;
-        s.synced += await syncNew(env, client, locs, budget, s.notes);
+        s.synced += await syncNew(env, client, locs, budget, s.notes, !!only);
         const upd = updatedNotes.reduce((a, n) => a + n, 0);
         if (upd) s.notes.push(`${upd} review${upd === 1 ? " was" : "s were"} updated by the reviewer and moved back to the Inbox.`);
       } catch (e) {
@@ -515,7 +551,7 @@ export async function runAgent(env: Env, trigger: string, job: RunJob = "google"
       }
     }
 
-    if (doGoogle) {
+    if (doGoogle && !only) {
     // 1b. Make sure reviews that still need attention haven't been deleted on Google
     if (client && budget.left > 14) {
       try { await verifyStillOnGoogle(env, client, budget, Math.min(8, budget.left - 14), s.notes); }
@@ -571,7 +607,7 @@ export async function runAgent(env: Env, trigger: string, job: RunJob = "google"
       }
     }
 
-    if (doGoogle) {
+    if (doGoogle && !only) {
     // 5. Older history for statistics, using whatever budget is left
     if (client && locs.length) s.synced += await backfill(env, client, locs, budget, s.notes);
 
@@ -587,7 +623,7 @@ export async function runAgent(env: Env, trigger: string, job: RunJob = "google"
   }
 
   // The run's work is already saved; recording it must never fail the run
-  const label = job === "external" ? `${trigger} (DealerRater/Cars.com)` : trigger;
+  const label = `${trigger}${only ? ` (${rooftopFor(only).name}, all sites)` : job === "external" ? " (DealerRater/Cars.com)" : job === "all" ? " (all sites)" : ""}`;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       await env.DB.prepare(

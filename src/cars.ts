@@ -175,11 +175,12 @@ async function upsert(env: Env, rooftop: string, kind: Kind, dealer: string, ite
 }
 
 /** Each run: newest reviews from every configured DealerRater and Cars.com listing, rotating if requests run short. */
-export async function syncExternal(env: Env, budget: Budget, notes: string[]): Promise<number> {
+export async function syncExternal(env: Env, budget: Budget, notes: string[], onlyStore?: string): Promise<number> {
   if (!externalConfigured(env)) return 0;
   const map = await getIds(env);
   const jobs: { rooftop: string; kind: Kind; dealer: string }[] = [];
   for (const [rooftop, v] of Object.entries(map)) {
+    if (onlyStore && rooftop !== onlyStore) continue;
     if (v.dr) jobs.push({ rooftop, kind: "dr", dealer: String(v.dr) });
     if (v.cars) jobs.push({ rooftop, kind: "cars", dealer: String(v.cars) });
   }

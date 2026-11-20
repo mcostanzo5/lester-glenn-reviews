@@ -115,6 +115,7 @@ async function me(env: Env, user: User) {
     approvers: (env.REPLY_APPROVERS || "").split(",").map((e) => e.trim()).filter(Boolean),
     sources: OUTSIDE_SOURCES,
     carsPosting: postingOn(env),
+    carsConfigured: externalConfigured(env),
     storeNames: Object.fromEntries([...ROOFTOPS, DEFAULT_ROOFTOP].map((r) => [r.key, r.name])),
     rooftops: visibleRooftops(user).map((r) => ({ ...r, open: map[r.key] || 0 })),
   });
@@ -671,7 +672,10 @@ async function escalationStats(env: Env, user: User, rooftop: string | null, fro
 async function admin(env: Env, user: User, req: Request, path: string, url: URL, body: any) {
   if (user.role !== "admin") return fail("Only admins can do that.", 403);
   if (path === "/api/admin/run" && req.method === "POST") {
-    return json(await runAgent(env, `manual:${user.email}`, body?.job === "external" ? "external" : "google"));
+    const job = body?.job === "external" ? "external" : body?.job === "all" ? "all" : "google";
+    const store = body?.rooftop ? String(body.rooftop) : undefined;
+    if (store && store !== "group" && !ROOFTOPS.some((r) => r.key === store)) return fail("Unknown store.");
+    return json(await runAgent(env, `manual:${user.email}`, job, store));
   }
   if (path === "/api/admin/samples" && req.method === "POST") {
     if (body?.action === "clear") { await clearSamples(env); return json({ ok: true }); }

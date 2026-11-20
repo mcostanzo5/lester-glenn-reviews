@@ -332,6 +332,18 @@ flagging, and the run notes say so.
 
 ## Run schedule and ignored listings
 
+Every Google check also compares each listing's newest 50 reviews with what's
+stored and saves any that are missing (no extra requests), so a review Google lists
+late still comes in. **Settings > Run for [store]** (with a store picked on the left)
+checks just that store's Google listings, DealerRater and Cars.com; **Run all stores**
+does the Google run and then the DealerRater/Cars.com run.
+
+Each Google check also confirms that replies we posted are actually showing. If a
+reply posted more than an hour ago isn't on Google (removed, not accepted, or
+deleted in Business Profile), the review goes back to the Inbox as Post failed with
+a note, so it can be checked and approved again. One-store runs look back 90 days
+for missing reviews; scheduled runs check each listing's newest 50.
+
 Google listings are checked in rotation, so if a run runs short of requests, the
 listings it skipped go first next run. Runs are staggered so none gets too long: on the hour (8, 12, 4, 8 Eastern) the
 agent checks Google; at :30 it checks DealerRater and Cars.com. Both draft whatever
