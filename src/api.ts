@@ -878,7 +878,8 @@ async function staffApi(env: Env, user: User, req: Request, path: string, url: U
           COUNT(DISTINCT CASE WHEN r.source IS NULL THEN m.review_id END) AS on_google,
           COUNT(DISTINCT CASE WHEN r.source = 'DealerRater' THEN m.review_id END) AS on_dealerrater,
           COUNT(DISTINCT CASE WHEN r.source = 'Cars.com' THEN m.review_id END) AS on_cars,
-          COUNT(DISTINCT CASE WHEN r.source IS NOT NULL AND r.source NOT IN ('DealerRater', 'Cars.com') THEN m.review_id END) AS on_other,
+          COUNT(DISTINCT CASE WHEN r.source = 'Facebook' THEN m.review_id END) AS on_facebook,
+          COUNT(DISTINCT CASE WHEN r.source IS NOT NULL AND r.source NOT IN ('DealerRater', 'Cars.com', 'Facebook') THEN m.review_id END) AS on_other,
           COUNT(DISTINCT CASE WHEN m.tagged_by = 'site' THEN m.review_id END) AS site_tagged
         ${base.replace("FROM mentions m", "FROM mentions m JOIN staff s ON s.id = m.staff_id")} AND m.match IN ('auto','manual')${roleSql}
         GROUP BY s.id ORDER BY reviews DESC, s.full_name`).bind(...args, ...(roleSql ? [role] : [])),

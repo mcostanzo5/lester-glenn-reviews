@@ -241,7 +241,8 @@ months to that store's escalation teams (Settings > Escalation teams): **Sales**
 goes to the sales team, **Service** to the service team, and **Sales and service**
 or **Other** to both. Recipients can be changed before sending, and each store's
 email can be previewed. The email has a totals table (total and per site), then
-each person's reviewers grouped by site (Google, DealerRater, Cars.com), newest
+each person's reviewers grouped by site (Google, DealerRater, Cars.com, and
+Facebook reviews added by hand), newest
 first, with negatives in red. Two spreadsheets are attached: totals, and every
 review behind them. It's sent from the sender's own mailbox, so it needs the same
 Mail.Send permission as escalations.
@@ -384,7 +385,7 @@ become staff mentions directly, matched to the store's roster by full name (the
 position helps tell apart two people with the same first name, and the customer's
 rating of that employee sets positive or negative). Claude still reads the text for
 anyone mentioned but not tagged, without double-counting. The Staff tab shows each
-person's total plus Google, DealerRater, Cars.com and other-site counts, and
+person's total plus Google, DealerRater, Cars.com, Facebook and other-site counts, and
 Statistics has a Reviews by site panel. The Cars.com feed is filtered to Cars.com reviews, so DealerRater reviews it
 syndicates aren't duplicated.
 
