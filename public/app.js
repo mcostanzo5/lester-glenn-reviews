@@ -1543,6 +1543,7 @@ async function renderStats() {
     <div class="kpi"><div class="fig">${pct(o.within_24, o.answered)}<small>%</small></div><div class="cap">Replies within 24 hours</div></div>
     <div class="kpi"><div class="fig">${o.avg_stars ?? "\u2013"}</div><div class="cap">Average rating, ${o.total} reviews</div></div>
     <button class="kpi kpi-link" data-open-unanswered="" ${o.open ? "" : "disabled"}><div class="fig">${o.open}</div><div class="cap">Still unanswered${o.open ? " \u203a" : ""}</div></button>
+    <button class="kpi kpi-link" data-open-esc="" ${o.open_escalations ? "" : "disabled"}><div class="fig ${o.open_escalations ? "late" : ""}">${o.open_escalations || 0}</div><div class="cap">Open escalations, all sites${o.open_escalations ? " \u203a" : ""}</div></button>
   </div>`;
 
   const rows = s.rooftops.slice().sort((a, b) => b.total - a.total).map((r) => {
@@ -1552,12 +1553,13 @@ async function renderStats() {
       <td><div class="rate"><div class="bar"><span class="${rate < 80 ? "warn" : ""}" style="width:${rate}%"></span></div>${rate}%</div></td>
       <td class="num">${r.avg_hours == null ? "\u2013" : r.avg_hours < 48 ? Math.round(r.avg_hours) + " hr" : (r.avg_hours / 24).toFixed(1) + " days"}</td>
       <td class="num">${r.open ? `<button class="link-btn" data-open-unanswered="${esc(r.rooftop_key)}">${r.open}</button>` : 0}</td>
+      <td class="num">${r.open_escalations ? `<button class="link-btn late" data-open-esc="${esc(r.rooftop_key)}">${r.open_escalations}</button>` : 0}</td>
       <td class="num ${oldest > 3 ? "late" : ""}">${oldest == null ? "\u2013" : oldest < 1 ? "Today" : Math.round(oldest) + " days"}</td></tr>`;
   }).join("");
   const table = s.rooftops.length > 1 || !state.rooftop ? `<div class="panel"><h3>By store</h3>
-    <p class="note">Response rates under 80% show in red. Oldest open review turns red after 3 days.</p>
+    <p class="note">Google reviews in this range. Response rates under 80% show in red; oldest open review turns red after 3 days. Open escalations counts every site and any posting date.</p>
     <div class="table-wrap"><table><thead><tr><th>Store</th><th class="num">Reviews</th><th class="num">Rating</th><th>Response rate</th>
-    <th class="num">Avg reply time</th><th class="num">Unanswered</th><th class="num">Oldest open</th></tr></thead><tbody>${rows}</tbody></table></div></div>` : "";
+    <th class="num">Avg reply time</th><th class="num">Unanswered</th><th class="num" title="Every open escalation, on any site, whenever the review was posted">Open escalations</th><th class="num">Oldest open</th></tr></thead><tbody>${rows}</tbody></table></div></div>` : "";
 
   const dist = [5, 4, 3, 2, 1].map((n) => {
     const c = s.stars.find((x) => x.stars === n)?.n || 0;
@@ -1577,6 +1579,10 @@ async function renderStats() {
     </div></div>${bySiteHtml(s.bySite)}${escalationStatsHtml(s.escalations)}`;
   bindRange();
   v.querySelectorAll("[data-open-review]").forEach((b) => (b.onclick = () => openDetail(b.dataset.openReview)));
+  v.querySelectorAll("[data-open-esc]").forEach((b) => (b.onclick = () => {
+    if (b.dataset.openEsc) { state.rooftop = b.dataset.openEsc; renderRail(); }
+    state.staleOnly = false; setView("escalations");
+  }));
   v.querySelectorAll("[data-open-unanswered]").forEach((b) => (b.onclick = () => {
     // Open All reviews filtered to the same unanswered reviews this number counts
     if (b.dataset.openUnanswered) state.rooftop = b.dataset.openUnanswered;
@@ -1595,11 +1601,11 @@ function bySiteHtml(rows) {
   return `<div class="panel"><h3>Reviews by site</h3>
     <p class="note">Every review in this range for the selected store, by where it was posted. The numbers above cover Google only.</p>
     <div class="table-wrap"><table><thead><tr><th>Site</th><th class="num">Reviews</th><th>Share</th><th class="num">Rating</th>
-      <th class="num">4\u20135 \u2605</th><th class="num">3 \u2605</th><th class="num">1\u20132 \u2605</th></tr></thead><tbody>
+      <th class="num">4\u20135 \u2605</th><th class="num">3 \u2605</th><th class="num">1\u20132 \u2605</th><th class="num">Unanswered</th></tr></thead><tbody>
     ${rows.map((r) => `<tr><td><b>${esc(r.site)}</b></td><td class="num">${r.total}</td>
       <td><span class="share-bar"><span style="width:${Math.round((r.total / max) * 100)}%"></span></span> <span class="meta">${Math.round((r.total / total) * 100)}%</span></td>
-      <td class="num">${r.avg_stars ?? "\u2013"}</td><td class="num">${r.positive || 0}</td><td class="num">${r.neutral || 0}</td><td class="num ${r.negative ? "late" : ""}">${r.negative || 0}</td></tr>`).join("")}
-    <tr class="total-row"><td><b>All sites</b></td><td class="num"><b>${total}</b></td><td></td><td></td><td></td><td></td><td></td></tr>
+      <td class="num">${r.avg_stars ?? "\u2013"}</td><td class="num">${r.positive || 0}</td><td class="num">${r.neutral || 0}</td><td class="num ${r.negative ? "late" : ""}">${r.negative || 0}</td><td class="num">${r.unanswered ? `<b>${r.unanswered}</b>` : 0}</td></tr>`).join("")}
+    <tr class="total-row"><td><b>All sites</b></td><td class="num"><b>${total}</b></td><td></td><td></td><td></td><td></td><td></td><td class="num"><b>${rows.reduce((a, r) => a + (r.unanswered || 0), 0)}</b></td></tr>
     </tbody></table></div></div>`;
 }
 

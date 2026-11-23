@@ -234,6 +234,15 @@ also caps CPU time at 10 ms per run, which heavy history-import runs can brush
 against (check the Worker's Metrics page for "Exceeded CPU" errors), and on paid
 you can set `EXTERNAL_REQUEST_BUDGET = "900"` so history imports in one run.
 
+## Statistics: what counts where
+
+The headline numbers and the By store table cover Google reviews posted in the
+selected range (response rate, reply time, unanswered). **Open escalations** is the
+exception: it counts every open escalation on any site, whenever the review was
+posted, and clicking it opens the Escalations tab for that store. Reviews by site
+covers every site, with an Unanswered column. Reviews marked removed from Google
+aren't counted anywhere.
+
 ## Emailing the Statistics page
 
 **Statistics > Email report** (admins and managers) emails the current view: with

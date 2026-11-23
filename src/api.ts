@@ -579,10 +579,21 @@ async function stats(env: Env, user: User, url: URL) {
     q(`SELECT stars, COUNT(*) AS n FROM reviews WHERE ${where} GROUP BY stars`),
   ]);
   const names = Object.fromEntries([...ROOFTOPS, DEFAULT_ROOFTOP].map((r) => [r.key, r.name]));
+  // Open escalations count now, on every site, whenever the review was posted
+  const openEsc = new Map<string, number>();
+  if (await hasEscalationCols(env)) {
+    const sc = scope(user, env, url.searchParams.get("rooftop"));
+    for (const r of (await env.DB.prepare(`SELECT rooftop_key, COUNT(*) AS n FROM reviews WHERE ${sc.sql} AND escalation_open > 0 AND status != 'removed' GROUP BY rooftop_key`)
+      .bind(...sc.args).all<{ rooftop_key: string; n: number }>()).results) openEsc.set(r.rooftop_key, r.n);
+  }
+  const storeRows = (byRooftop.results as any[]).map((r) => ({ ...r, name: names[r.rooftop_key] || r.rooftop_key, open_escalations: openEsc.get(r.rooftop_key) || 0 }));
+  for (const [k, n] of openEsc) {
+    if (!storeRows.some((r) => r.rooftop_key === k)) storeRows.push({ rooftop_key: k, name: names[k] || k, total: 0, answered: 0, open: 0, avg_stars: null, avg_hours: null, open_escalations: n });
+  }
   return json({
     days,
-    overall: overall.results[0],
-    rooftops: (byRooftop.results as any[]).map((r) => ({ ...r, name: names[r.rooftop_key] || r.rooftop_key })),
+    overall: { ...(overall.results[0] as any), open_escalations: [...openEsc.values()].reduce((a, n) => a + n, 0) },
+    rooftops: storeRows,
     monthly: monthly.results,
     stars: starsDist.results,
     escalations: await escalationStats(env, user, url.searchParams.get("rooftop"), from, to, names),
@@ -590,7 +601,8 @@ async function stats(env: Env, user: User, url: URL) {
       const siteWhere = where.replace("source IS NULL AND ", "");
       if (siteWhere === where) return null; // source column missing
       return (await env.DB.prepare(`SELECT COALESCE(source, 'Google') AS site, COUNT(*) AS total, ROUND(AVG(NULLIF(stars, 0)), 2) AS avg_stars,
-          SUM(stars >= 4) AS positive, SUM(stars = 3) AS neutral, SUM(stars BETWEEN 1 AND 2) AS negative
+          SUM(stars >= 4) AS positive, SUM(stars = 3) AS neutral, SUM(stars BETWEEN 1 AND 2) AS negative,
+          SUM(${NO_REPLY}) AS unanswered
         FROM reviews WHERE ${siteWhere} GROUP BY site ORDER BY total DESC`).bind(...args).all()).results;
     })(),
   });

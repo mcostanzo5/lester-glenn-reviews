@@ -377,7 +377,7 @@ th.site-col { border-left: 1px solid var(--line); }
 @media (max-width: 760px) { .theme-row { grid-template-columns: 120px 1fr 32px; } }
 
 /* Statistics */
-.kpis { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--panel); margin-bottom: 22px; }
+.kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: var(--radius-m); background: var(--panel); margin-bottom: 22px; }
 .kpi { padding: 14px 16px; border-right: 1px solid var(--line); }
 .kpi:last-child { border-right: 0; }
 .kpi-link { border: 0; border-right: 1px solid var(--line); background: none; text-align: left; font: inherit; color: inherit; cursor: pointer; }
