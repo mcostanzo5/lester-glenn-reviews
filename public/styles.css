@@ -293,6 +293,14 @@ tr.clickable:hover td { background: var(--paper); }
 .sites-menu { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 8px 12px; box-shadow: 0 6px 18px rgba(0,0,0,.12); min-width: 180px; }
 .sites-menu .check { display: flex; gap: 8px; align-items: center; padding: 3px 0; font-weight: 400; white-space: nowrap; }
 
+/* Statistics email */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; border: 1px solid var(--line); border-radius: var(--radius-s); padding: 6px; min-height: 38px; max-height: 160px; overflow-y: auto; background: var(--panel); }
+.chip { display: inline-flex; align-items: center; gap: 4px; background: var(--blue-wash); color: var(--ink); border-radius: 999px; padding: 2px 4px 2px 10px; font-size: 13px; }
+.chip button { border: 0; background: none; cursor: pointer; font-size: 15px; line-height: 1; padding: 0 4px; color: var(--muted); }
+.chip button:hover { color: var(--red); }
+#seAdd { width: 100%; margin-top: 6px; border: 1px solid var(--line); border-radius: var(--radius-s); padding: 6px 8px; font: inherit; font-size: 14px; background: var(--panel); color: var(--ink); }
+.pdf-capture .filters, .pdf-capture #emailStats { display: none !important; }
+
 /* Staff report email */
 .report-dialog { max-width: 760px; width: 94vw; }
 .rep-list { list-style: none; padding: 0; margin: 8px 0; max-height: 52vh; overflow-y: auto; }

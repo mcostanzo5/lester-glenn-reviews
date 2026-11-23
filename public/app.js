@@ -1217,6 +1217,112 @@ function bindRoster() {
   }));
 }
 
+/* ---------- Email the Statistics page ---------- */
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) return resolve();
+    const el = document.createElement("script");
+    el.src = src; el.onload = resolve; el.onerror = () => reject(new Error("Couldn't load the PDF tools. Check your connection and try again."));
+    document.head.appendChild(el);
+  });
+}
+
+function statsLabel(days) {
+  if (days === -1) {
+    const f = (d) => d ? new Date(d + "T12:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "";
+    return state.statsStart && state.statsEnd ? `${f(state.statsStart)} to ${f(state.statsEnd)}` : state.statsStart ? `Since ${f(state.statsStart)}` : `Through ${f(state.statsEnd)}`;
+  }
+  return days === 0 ? "All time" : days === 365 ? "Last 12 months" : `Last ${days} days`;
+}
+
+/** The Statistics page as a PDF (letter pages), built in the browser. Returns base64. */
+async function statsPdf(title) {
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js");
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
+  const el = $("#view");
+  document.documentElement.setAttribute("data-theme", "light");
+  el.classList.add("pdf-capture");
+  let canvas;
+  try { canvas = await window.html2canvas(el, { scale: 1.5, backgroundColor: "#ffffff" }); }
+  finally { el.classList.remove("pdf-capture"); document.documentElement.removeAttribute("data-theme"); }
+  const pdf = new window.jspdf.jsPDF({ unit: "pt", format: "letter" });
+  const pw = 612, ph = 792, m = 28, iw = pw - 2 * m, k = iw / canvas.width;
+  pdf.setFontSize(15); pdf.text(title, m, m + 8);
+  pdf.setFontSize(9); pdf.setTextColor(110); pdf.text(`Created ${new Date().toLocaleString("en-US")}`, m, m + 22); pdf.setTextColor(0);
+  let sy = 0, first = true;
+  while (sy < canvas.height) {
+    const top = first ? m + 34 : m;
+    const h = Math.min(Math.floor((ph - m - top) / k), canvas.height - sy);
+    const slice = document.createElement("canvas");
+    slice.width = canvas.width; slice.height = h;
+    const ctx = slice.getContext("2d");
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, slice.width, h);
+    ctx.drawImage(canvas, 0, sy, canvas.width, h, 0, 0, canvas.width, h);
+    if (!first) pdf.addPage();
+    pdf.addImage(slice.toDataURL("image/jpeg", 0.82), "JPEG", m, top, iw, h * k);
+    sy += h; first = false;
+  }
+  return pdf.output("datauristring").split(",")[1];
+}
+
+async function openStatsEmail(days) {
+  const label = statsLabel(days);
+  const store = state.rooftop || "";
+  const scopeName = store ? storeName(store) : "All stores";
+  const params = days === -1 ? { days: 0, start: state.statsStart, end: state.statsEnd } : { days };
+  const dlg = document.createElement("dialog");
+  dlg.className = "outcome-dialog report-dialog";
+  dlg.innerHTML = `<h3>Email review report: ${esc(scopeName)}, ${esc(label)}</h3>
+    <p class="meta">${store ? "Filled in from this store's escalation teams." : "Filled in from every store's escalation teams."} Remove anyone with \u00d7, or add addresses.
+      The email has the headline numbers and per-store tables; the full Statistics page is attached as a PDF. Sent from your mailbox.</p>
+    <div class="field"><span>To</span><div class="chips" id="seChips"></div>
+      <input id="seAdd" placeholder="Add an email address and press Enter" autocomplete="off"></div>
+    <label class="field">Note (optional, appears at the top)<textarea id="seNote" rows="2"></textarea></label>
+    <div id="sePreview"></div>
+    <div class="actions"><button class="btn primary" id="seSend">Send</button><button class="btn" id="sePrev">Preview email</button><button class="btn quiet" id="seClose">Cancel</button></div>`;
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  const close = () => { dlg.close(); dlg.remove(); };
+  $("#seClose").onclick = close;
+  dlg.addEventListener("cancel", () => dlg.remove());
+  let to = [];
+  const draw = () => {
+    $("#seChips").innerHTML = to.length ? to.map((a, i) => `<span class="chip">${esc(a)}<button type="button" aria-label="Remove ${esc(a)}" data-rm="${i}">\u00d7</button></span>`).join("")
+      : `<span class="meta">No one yet. ${store ? "This store has no escalation team lists (Settings > Escalation teams)." : ""}</span>`;
+    $("#seChips").querySelectorAll("[data-rm]").forEach((b) => (b.onclick = () => { to.splice(+b.dataset.rm, 1); draw(); }));
+  };
+  try { const r = await api(`/api/stats/recipients${store ? "?rooftop=" + encodeURIComponent(store) : ""}`); to = r.recipients; if (!r.canSend) toast("Before you can send, sign out and back in once so Microsoft lets this app send from your mailbox.", true); }
+  catch (err) { toast(err.message, true); }
+  draw();
+  const add = () => {
+    if (!$("#seAdd").value.trim()) return; // nothing typed: don't redraw (it would swallow a click on a chip's \u00d7)
+    const parts = $("#seAdd").value.split(/[\s,;]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
+    for (const a of parts) if (/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(a) && !to.includes(a)) to.push(a);
+    $("#seAdd").value = ""; draw();
+  };
+  $("#seAdd").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); add(); } });
+  $("#seAdd").addEventListener("blur", add);
+  const body = () => ({ ...params, rooftop: store, label, note: $("#seNote").value, recipients: to });
+  $("#sePrev").onclick = async () => {
+    try { const r = await api("/api/stats/email", { method: "POST", body: { ...body(), preview: true } });
+      $("#sePreview").innerHTML = `<iframe class="email-preview rep-preview" title="Email preview"></iframe>`; $("#sePreview iframe").srcdoc = r.html; }
+    catch (err) { toast(err.message, true); }
+  };
+  $("#seSend").onclick = async (e) => {
+    add();
+    if (!to.length) return toast("Add at least one recipient.", true);
+    const b = e.target; b.disabled = true;
+    try {
+      dlg.close(); b.textContent = "Making the PDF\u2026";
+      const pdf = await statsPdf(`Review report: ${scopeName}, ${label}`);
+      dlg.showModal(); b.textContent = "Sending\u2026";
+      const r = await api("/api/stats/email", { method: "POST", body: { ...body(), pdf } });
+      toast(`Sent to ${r.sent} ${r.sent === 1 ? "person" : "people"}`); close();
+    } catch (err) { if (!dlg.open) dlg.showModal(); toast(err.message, true); b.disabled = false; b.textContent = "Send"; }
+  };
+}
+
 /* ---------- Email the staff report to each store's team ---------- */
 
 async function openStaffEmail(f, label) {
@@ -1398,10 +1504,12 @@ async function renderStats() {
   const range = `<div class="filters"><label for="sDays" class="sr">Time range</label>
     <select id="sDays">${[[30, "Last 30 days"], [90, "Last 90 days"], [365, "Last 12 months"], [0, "All time"], [-1, "Custom range\u2026"]]
       .map(([d, l]) => `<option value="${d}" ${d === days ? "selected" : ""}>${l}</option>`).join("")}</select>
+    ${state.me.role === "admin" || state.me.role === "manager" ? `<button class="btn" id="emailStats" type="button">Email report</button>` : ""}
     ${days === -1 ? `<div class="custom-range">
       <label>From <input type="date" id="sStart" value="${esc(state.statsStart)}" max="${today}"></label>
       <label>To <input type="date" id="sEnd" value="${esc(state.statsEnd)}" max="${today}"></label></div>` : ""}</div>`;
   const bindRange = () => {
+    if ($("#emailStats")) $("#emailStats").onclick = () => openStatsEmail(days);
     $("#sDays").onchange = (e) => { state.statsDays = parseInt(e.target.value, 10); renderStats(); };
     const dates = () => {
       let a = $("#sStart").value, b = $("#sEnd").value;

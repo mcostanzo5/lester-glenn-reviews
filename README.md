@@ -234,6 +234,16 @@ also caps CPU time at 10 ms per run, which heavy history-import runs can brush
 against (check the Worker's Metrics page for "Exceeded CPU" errors), and on paid
 you can set `EXTERNAL_REQUEST_BUDGET = "900"` so history imports in one run.
 
+## Emailing the Statistics page
+
+**Statistics > Email report** (admins and managers) emails the current view: with
+a store picked on the left, it fills in that store's escalation team lists; with All
+stores, every store's lists, without duplicates. Remove anyone or add addresses, and
+add an optional note. The email has the headline numbers, the By store table,
+Reviews by site and the escalation summary; the full Statistics page (charts
+included) is attached as a PDF, built in the browser. It's sent from the sender's
+own mailbox, so it needs the same Mail.Send permission as escalations.
+
 ## Emailing staff reports
 
 On the Staff tab, **Email to managers** sends each store's report for the selected
@@ -246,6 +256,15 @@ Facebook reviews added by hand), newest
 first, with negatives in red. Two spreadsheets are attached: totals, and every
 review behind them. It's sent from the sender's own mailbox, so it needs the same
 Mail.Send permission as escalations.
+
+## Claude models and cost
+
+Replies are written with `CLAUDE_MODEL`. Reading reviews for staff names and topics
+(the biggest share of Claude usage) uses `EXTRACT_MODEL`, a cheaper model
+(`claude-haiku-5-5`). If that model isn't available on the account, reading falls
+back to `CLAUDE_MODEL` automatically. Delete the `EXTRACT_MODEL` line in wrangler.toml
+to use `CLAUDE_MODEL` for everything. If Claude's monthly spending limit is reached,
+drafts wait and retry at the next run once it's raised or resets.
 
 ## Topics and word clouds
 

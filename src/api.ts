@@ -18,6 +18,7 @@ import { draftReply } from "./drafter";
 import { matchRooftop, replyRooftop, rooftopFor } from "./rooftops";
 import { allowedDomains, canSendAs, decryptText, encryptText, checkAddresses, mailConfigured, MailError, sendAs } from "./mail";
 import { defaultRecipients, reportCsvs, reportEmail, storeReport, type ReportRole } from "./staffreport";
+import { statsEmail } from "./statsreport";
 
 const ANSWERED_SQL = "('auto_posted','approved_posted','replied_external','external_done')";
 const OPEN_SQL = "('new','pending','ready','approved','error','old_unanswered','external')";
@@ -611,6 +612,49 @@ async function staleEscalations(env: Env, user: User): Promise<Response> {
   return json({ days, reviews: rows });
 }
 
+/** Everyone on the escalation team lists for one store, or for every store the person can see. */
+async function statsRecipients(env: Env, user: User, url: URL): Promise<Response> {
+  if (user.role !== "admin" && user.role !== "manager") return json({ recipients: [] });
+  const one = url.searchParams.get("rooftop");
+  const keys = (one && one !== "" ? [one] : ROOFTOPS.map((r) => r.key)).filter((k) => canAct(user, k));
+  const all = new Set<string>();
+  for (const k of keys) {
+    const t = await getTeams(env, k);
+    for (const list of Object.values(t)) for (const a of list || []) all.add(String(a).toLowerCase());
+  }
+  return json({ recipients: [...all].sort(), canSend: await canSendAs(env, user.email) });
+}
+
+/** Emails the Statistics page: tables in the body, the page itself as an attached PDF. */
+async function statsEmailSend(env: Env, user: User, req: Request, body: any): Promise<Response> {
+  if (user.role !== "admin" && user.role !== "manager") return fail("Only admins and managers can email reports.", 403);
+  const rooftop = body?.rooftop ? String(body.rooftop) : "";
+  if (rooftop && !canAct(user, rooftop)) return fail("You can't send reports for that store.", 403);
+  const q = new URL(req.url);
+  q.search = "";
+  for (const k of ["days", "start", "end"]) if (body?.[k] !== undefined && body[k] !== "") q.searchParams.set(k, String(body[k]));
+  if (rooftop) q.searchParams.set("rooftop", rooftop);
+  const s: any = await (await stats(env, user, q)).json();
+  const scopeName = rooftop ? rooftopFor(rooftop).name : "All Lester Glenn stores";
+  const label = String(body?.label || "").slice(0, 80) || "Review statistics";
+  const note = String(body?.note || "").replace(/\s*\u2014\s*/g, ", ").trim().slice(0, 2000);
+  const m = statsEmail(s, scopeName, label, note, user.name || user.email, new URL(req.url).origin);
+  if (body?.preview) return json({ subject: m.subject, html: m.html });
+  if (!(await canSendAs(env, user.email))) return fail("Before you can send, sign out and sign back in once so Microsoft lets this app send from your mailbox.", 403);
+  const { ok, bad } = checkAddresses(env, body?.recipients);
+  if (bad.length) return fail(`These addresses aren't allowed: ${bad.join(", ")}`);
+  if (!ok.length) return fail("Add at least one recipient.");
+  const pdf = String(body?.pdf || "");
+  if (pdf && !/^[A-Za-z0-9+/=]+$/.test(pdf)) return fail("The PDF didn't come through correctly. Try again.");
+  if (pdf.length > 3_300_000) return fail("The PDF is too large to email (over about 2.5 MB). Pick a shorter date range or a single store and try again.");
+  const slug = `${scopeName}-${label}`.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase();
+  try {
+    await sendAs(env, user.email, { to: ok, subject: m.subject, html: m.html,
+      attachments: pdf ? [{ name: `review-report-${slug}.pdf`, contentType: "application/pdf", base64: pdf }] : [] });
+  } catch (e) { return fail((e as Error).message, 502); }
+  return json({ sent: ok.length, to: ok });
+}
+
 /** Themes and key phrases across reviews for a range of calendar months (Topics tab). */
 async function topicsApi(env: Env, user: User, path: string, url: URL): Promise<Response> {
   const range = monthRange(url.searchParams.get("from") || "", url.searchParams.get("to") || "");
@@ -824,6 +868,8 @@ export async function handleApi(req: Request, env: Env, user: User): Promise<Res
   }
   if (path === "/api/reviews" && req.method === "GET") return listReviews(env, user, url);
   if (path === "/api/reviews" && req.method === "POST") return createManualReview(env, user, body);
+  if (path === "/api/stats/recipients") return statsRecipients(env, user, url);
+  if (path === "/api/stats/email" && req.method === "POST") return statsEmailSend(env, user, req, body);
   if (path === "/api/stats") return stats(env, user, url);
   if (path.startsWith("/api/admin/")) return admin(env, user, req, path, url, body);
   if (path.startsWith("/api/staff")) return staffApi(env, user, req, path, url, body);

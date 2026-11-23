@@ -13,6 +13,7 @@ export interface Env {
   MAX_DRAFTS_PER_RUN: string;
   AUTO_POST_MIN_STARS: string;
   CLAUDE_MODEL: string;
+  EXTRACT_MODEL?: string; // cheaper model for reading reviews for staff names and topics
   EXTERNAL_REQUEST_BUDGET: string;
   BACKFILL_PAGES_PER_RUN: string;
   RUN_HOURS_ET: string;

@@ -49,6 +49,9 @@ AUTO_POST_MIN_STARS = "4"
 # "off": nothing posts until an approver approves it (even in live mode). "on": clean 4-5 star drafts post on their own.
 AUTO_POST = "off"
 CLAUDE_MODEL = "claude-sonnet-5"
+# Cheaper model for reading reviews for staff names and topics (replies still use CLAUDE_MODEL).
+# Delete this line to use CLAUDE_MODEL for everything.
+EXTRACT_MODEL = "claude-haiku-5-5"
 # Hours (24h, Eastern) when scheduled runs happen
 RUN_HOURS_ET = "8,12,16,20"
 # Max Google + Claude calls per run. Free plan limit is 50; keep 45 there.

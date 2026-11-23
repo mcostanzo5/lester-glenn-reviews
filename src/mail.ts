@@ -150,7 +150,7 @@ async function accessTokenFor(env: Env, email: string): Promise<string> {
   return data.access_token;
 }
 
-export interface Attachment { name: string; contentType: string; text: string }
+export interface Attachment { name: string; contentType: string; text?: string; base64?: string }
 export interface Outgoing { to: string[]; subject: string; html: string; attachments?: Attachment[] }
 
 /** Text file contents as base64 for Microsoft Graph (UTF-8 safe). */
@@ -173,7 +173,7 @@ export async function sendAs(env: Env, email: string, m: Outgoing): Promise<void
         body: { contentType: "HTML", content: m.html },
         toRecipients: m.to.map((a) => ({ emailAddress: { address: a } })),
         ...(m.attachments?.length ? { attachments: m.attachments.map((a) => ({
-          "@odata.type": "#microsoft.graph.fileAttachment", name: a.name, contentType: a.contentType, contentBytes: toBase64(a.text),
+          "@odata.type": "#microsoft.graph.fileAttachment", name: a.name, contentType: a.contentType, contentBytes: a.base64 ?? toBase64(a.text || ""),
         })) } : {}),
       },
       saveToSentItems: true,

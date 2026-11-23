@@ -142,11 +142,13 @@ async function extractSafe(env: Env, items: { i: number; text: string }[], budge
 async function extract(env: Env, items: { i: number; text: string }[], budget: Budget): Promise<Map<number, Extracted>> {
   if (!env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY is not set.");
   budget.take();
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  // Reading for staff names and topics is simple extraction, so it uses a cheaper model (EXTRACT_MODEL).
+  // If that model isn't available on this account, fall back to the reply model.
+  const call = (model: string) => fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
-    headers: { "x-api-key": env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+    headers: { "x-api-key": env.ANTHROPIC_API_KEY!, "anthropic-version": "2023-06-01", "content-type": "application/json" },
     body: JSON.stringify({
-      model: env.CLAUDE_MODEL || "claude-sonnet-5",
+      model,
       max_tokens: 8000,
       system: EXTRACT_PROMPT,
       tools: [RESULTS_TOOL],
@@ -154,6 +156,16 @@ async function extract(env: Env, items: { i: number; text: string }[], budget: B
       messages: [{ role: "user", content: JSON.stringify(items) }],
     }),
   });
+  const main = env.CLAUDE_MODEL || "claude-sonnet-5";
+  const cheap = env.EXTRACT_MODEL || main;
+  let res = await call(cheap);
+  if (!res.ok && cheap !== main && (res.status === 404 || res.status === 400)) {
+    const err: any = await res.clone().json().catch(() => ({}));
+    if (/model/i.test(String(err?.error?.message || ""))) {
+      console.warn(`EXTRACT_MODEL ${cheap} not available (${err?.error?.message}); using ${main}`);
+      res = await call(main);
+    }
+  }
   if (!res.ok) {
     const err: any = await res.json().catch(() => ({}));
     throw new Error(`Claude API error ${res.status}: ${String(err?.error?.message || "no details").slice(0, 200)}`);
