@@ -201,7 +201,7 @@ out. If a token stops working, the dashboard asks them to sign out and back in.
 **One-time setup**
 1. Run the SQL in `migrations/0003_escalations.sql` in the D1 console. Run it
    once only (a second run gives harmless "duplicate column" errors). Then run
-   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql`, `migrations/0010_insights.sql`, `migrations/0011_feedback.sql`, `migrations/0012_updated_reviews.sql`, `migrations/0013_external_reviews.sql` and `migrations/0014_site_tags.sql`.
+   `migrations/0004_user_tokens.sql` and `migrations/0005_escalation_details.sql`. For manual escalations and notes, also run `migrations/0008_manual_reviews_and_notes.sql`, then `migrations/0009_removed_and_reassigned.sql`, `migrations/0010_insights.sql`, `migrations/0011_feedback.sql`, `migrations/0012_updated_reviews.sql`, `migrations/0013_external_reviews.sql`, `migrations/0014_site_tags.sql` and `migrations/0015_store_volumes.sql`.
 2. IT adds two **delegated** Microsoft Graph permissions to the Lester Glenn
    Reviews app registration, **Mail.Send** and **offline_access**, and clicks
    **Grant admin consent**. Delegated Mail.Send only allows sending as the person
@@ -240,8 +240,20 @@ The headline numbers and the By store table cover Google reviews posted in the
 selected range (response rate, reply time, unanswered). **Open escalations** is the
 exception: it counts every open escalation on any site, whenever the review was
 posted, and clicking it opens the Escalations tab for that store. Reviews by site
-covers every site, with an Unanswered column. Reviews marked removed from Google
-aren't counted anywhere.
+covers every site, with an Unanswered column. **Oldest open** is the longer wait of the oldest unanswered Google review (from when
+it was posted) and the oldest open escalation (from when it was first escalated).
+Reviews marked removed from Google aren't counted anywhere.
+
+### Sold, ROs and review rate
+
+In By store, **Reviews** counts every site in the range, with a breakdown underneath.
+Admins and managers can enter **Sold** and **ROs** (repair orders) for each store and
+the selected date range; they save as you type. **Customers** is sold plus ROs, and
+**Review rate** is reviews (all sites) divided by customers, per store and in total.
+Counts are saved for the exact date range they were entered for; for whole calendar
+months, enter each month once and any range made of whole months adds them up
+(a quarter sums its three months). Rolling ranges like Last 30 days change daily,
+so use a custom range. The emailed report includes these columns.
 
 ## Emailing the Statistics page
 

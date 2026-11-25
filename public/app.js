@@ -1529,7 +1529,10 @@ async function renderStats() {
     return;
   }
   const o = s.overall;
-  if (!o.total) {
+  // Empty only when there's nothing at all: no reviews on any site, no open escalations, no store rows to enter counts for
+  const anything = o.total || (s.rooftops || []).some((r) => r.all_total || r.open_escalations || r.sold != null || r.ros != null)
+    || ((s.rooftops || []).length && s.range && (state.me.role === "admin" || state.me.role === "manager"));
+  if (!anything) {
     v.innerHTML = range + `<div class="empty-state"><strong>No reviews in this range</strong>Pick a longer time range or another store.</div>`;
     bindRange();
     return;
@@ -1546,20 +1549,64 @@ async function renderStats() {
     <button class="kpi kpi-link" data-open-esc="" ${o.open_escalations ? "" : "disabled"}><div class="fig ${o.open_escalations ? "late" : ""}">${o.open_escalations || 0}</div><div class="cap">Open escalations, all sites${o.open_escalations ? " \u203a" : ""}</div></button>
   </div>`;
 
-  const rows = s.rooftops.slice().sort((a, b) => b.total - a.total).map((r) => {
+  const canEnter = (state.me.role === "admin" || state.me.role === "manager") && !!s.range;
+  const fmtPct = (n, d) => (d ? `${((n / d) * 100).toFixed(1)}%` : "\u2013");
+  const siteLine = (sites) => {
+    const order = ["Google", "DealerRater", "Cars.com", "Facebook"];
+    const keys = Object.keys(sites || {}).sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
+    return keys.length ? keys.map((k) => `${esc(k)} ${sites[k]}`).join(", ") : "";
+  };
+  const volInput = (r, f) => canEnter
+    ? `<input class="vol-input" type="number" min="0" step="1" inputmode="numeric" data-vol="${f}" data-store="${esc(r.rooftop_key)}" value="${r[f] ?? ""}"
+        title="${r.volumes_from === "months" ? "Sum of the monthly entries; typing here saves a number for this exact range" : ""}" aria-label="${f === "sold" ? "Sold" : "Repair orders"} for ${esc(r.name)}">`
+    : `${r[f] ?? "\u2013"}`;
+  const rows = s.rooftops.slice().sort((a, b) => (b.all_total || 0) - (a.all_total || 0)).map((r) => {
     const rate = pct(r.answered, r.total);
     const oldest = r.oldest_open ? (Date.now() - Date.parse(r.oldest_open)) / 86400000 : null;
-    return `<tr><td>${esc(r.name.replace(/^Lester Glenn /, ""))}</td><td class="num">${r.total}</td><td class="num">${r.avg_stars ?? "\u2013"}</td>
-      <td><div class="rate"><div class="bar"><span class="${rate < 80 ? "warn" : ""}" style="width:${rate}%"></span></div>${rate}%</div></td>
+    const customers = (r.sold || 0) + (r.ros || 0);
+    return `<tr data-row="${esc(r.rooftop_key)}"><td>${esc(r.name.replace(/^Lester Glenn /, ""))}</td>
+      <td class="num"><b>${r.all_total || 0}</b>${r.all_total ? `<div class="site-break">${siteLine(r.sites)}</div>` : ""}</td>
+      <td class="num">${r.avg_stars ?? "\u2013"}</td>
+      <td><div class="rate"><div class="bar"><span class="${rate < 80 ? "warn" : ""}" style="width:${rate}%"></span></div>${r.total ? rate + "%" : "\u2013"}</div></td>
       <td class="num">${r.avg_hours == null ? "\u2013" : r.avg_hours < 48 ? Math.round(r.avg_hours) + " hr" : (r.avg_hours / 24).toFixed(1) + " days"}</td>
       <td class="num">${r.open ? `<button class="link-btn" data-open-unanswered="${esc(r.rooftop_key)}">${r.open}</button>` : 0}</td>
       <td class="num">${r.open_escalations ? `<button class="link-btn late" data-open-esc="${esc(r.rooftop_key)}">${r.open_escalations}</button>` : 0}</td>
-      <td class="num ${oldest > 3 ? "late" : ""}">${oldest == null ? "\u2013" : oldest < 1 ? "Today" : Math.round(oldest) + " days"}</td></tr>`;
+      <td class="num ${oldest > 3 ? "late" : ""}">${oldest == null ? "\u2013" : oldest < 1 ? "Today" : Math.round(oldest) + " days"}</td>
+      <td class="num vol">${volInput(r, "sold")}</td><td class="num vol">${volInput(r, "ros")}</td>
+      <td class="num" data-cust>${customers || "\u2013"}</td><td class="num" data-rrate><b>${fmtPct(r.all_total || 0, customers)}</b></td></tr>`;
   }).join("");
-  const table = s.rooftops.length > 1 || !state.rooftop ? `<div class="panel"><h3>By store</h3>
-    <p class="note">Google reviews in this range. Response rates under 80% show in red; oldest open review turns red after 3 days. Open escalations counts every site and any posting date.</p>
-    <div class="table-wrap"><table><thead><tr><th>Store</th><th class="num">Reviews</th><th class="num">Rating</th><th>Response rate</th>
-    <th class="num">Avg reply time</th><th class="num">Unanswered</th><th class="num" title="Every open escalation, on any site, whenever the review was posted">Open escalations</th><th class="num">Oldest open</th></tr></thead><tbody>${rows}</tbody></table></div></div>` : "";
+  const totals = () => {
+    const t = s.rooftops.reduce((a, r) => ({ reviews: a.reviews + (r.all_total || 0), sold: a.sold + (r.sold || 0), ros: a.ros + (r.ros || 0),
+      withVol: a.withVol + ((r.sold || r.ros) ? (r.all_total || 0) : 0) }), { reviews: 0, sold: 0, ros: 0, withVol: 0 });
+    return `<td><b>All stores</b></td><td class="num"><b>${t.reviews}</b></td><td></td><td></td><td></td><td></td><td></td><td></td>
+      <td class="num"><b>${t.sold || "\u2013"}</b></td><td class="num"><b>${t.ros || "\u2013"}</b></td><td class="num"><b>${t.sold + t.ros || "\u2013"}</b></td>
+      <td class="num"><b>${fmtPct(t.withVol, t.sold + t.ros)}</b></td>`;
+  };
+  const table = s.rooftops.length ? `<div class="panel"><h3>By store</h3>
+    <p class="note"><b>Reviews</b> counts every site in this range, with the breakdown underneath. Rating, response rate, reply time and unanswered cover Google.
+      Response rates under 80% show in red. Open escalations counts every site and any posting date. Oldest open is the longer wait of the oldest unanswered review (from when it was posted) and the oldest open escalation (from when it was first escalated), red after 3 days.
+      <b>Sold</b> and <b>ROs</b> are entered for this date range (enter whole months once, and multi-month ranges add them up); <b>Review rate</b> is reviews divided by customers (sold plus ROs).
+      ${s.range ? "" : "<b>Pick a date range to enter sold and RO counts.</b>"}</p>
+    <div class="table-wrap"><table class="by-store"><thead><tr><th>Store</th><th class="num">Reviews</th><th class="num">Rating</th><th>Response<br>rate</th>
+    <th class="num">Avg<br>reply</th><th class="num">Un&shy;answered</th><th class="num" title="Every open escalation, on any site, whenever the review was posted">Open<br>escalations</th><th class="num">Oldest<br>open</th>
+    <th class="num">Sold</th><th class="num">ROs</th><th class="num">Cus&shy;tomers</th><th class="num">Review<br>rate</th></tr></thead>
+    <tbody>${rows}</tbody>${s.rooftops.length > 1 ? `<tfoot><tr class="total-row" id="byStoreTotal">${totals()}</tr></tfoot>` : ""}</table></div></div>` : "";
+  const bindVolumes = () => {
+    v.querySelectorAll(".vol-input").forEach((inp) => (inp.onchange = async () => {
+      const key = inp.dataset.store, row = s.rooftops.find((r) => r.rooftop_key === key);
+      const tr = inp.closest("tr");
+      const sold = tr.querySelector('[data-vol="sold"]').value, ros = tr.querySelector('[data-vol="ros"]').value;
+      try {
+        await api("/api/stats/volumes", { method: "POST", body: { rooftop: key, start: s.range.start, end: s.range.end, sold, ros } });
+        row.sold = sold === "" ? null : +sold; row.ros = ros === "" ? null : +ros; row.volumes_from = "range";
+        const c = (row.sold || 0) + (row.ros || 0);
+        tr.querySelector("[data-cust]").textContent = c || "\u2013";
+        tr.querySelector("[data-rrate]").innerHTML = `<b>${fmtPct(row.all_total || 0, c)}</b>`;
+        if ($("#byStoreTotal")) $("#byStoreTotal").innerHTML = totals();
+        inp.classList.add("saved"); setTimeout(() => inp.classList.remove("saved"), 900);
+      } catch (err) { toast(err.message, true); }
+    }));
+  };
 
   const dist = [5, 4, 3, 2, 1].map((n) => {
     const c = s.stars.find((x) => x.stars === n)?.n || 0;
@@ -1579,6 +1626,7 @@ async function renderStats() {
     </div></div>${bySiteHtml(s.bySite)}${escalationStatsHtml(s.escalations)}`;
   bindRange();
   v.querySelectorAll("[data-open-review]").forEach((b) => (b.onclick = () => openDetail(b.dataset.openReview)));
+  bindVolumes();
   v.querySelectorAll("[data-open-esc]").forEach((b) => (b.onclick = () => {
     if (b.dataset.openEsc) { state.rooftop = b.dataset.openEsc; renderRail(); }
     state.staleOnly = false; setView("escalations");

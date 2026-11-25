@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS store_volumes (rooftop_key TEXT NOT NULL, start_day TEXT NOT NULL, end_day TEXT NOT NULL, sold INTEGER, ros INTEGER, updated_by TEXT, updated_at TEXT, PRIMARY KEY (rooftop_key, start_day, end_day));

@@ -581,19 +581,60 @@ async function stats(env: Env, user: User, url: URL) {
   const names = Object.fromEntries([...ROOFTOPS, DEFAULT_ROOFTOP].map((r) => [r.key, r.name]));
   // Open escalations count now, on every site, whenever the review was posted
   const openEsc = new Map<string, number>();
+  const oldestEsc = new Map<string, string>();
   if (await hasEscalationCols(env)) {
     const sc = scope(user, env, url.searchParams.get("rooftop"));
-    for (const r of (await env.DB.prepare(`SELECT rooftop_key, COUNT(*) AS n FROM reviews WHERE ${sc.sql} AND escalation_open > 0 AND status != 'removed' GROUP BY rooftop_key`)
-      .bind(...sc.args).all<{ rooftop_key: string; n: number }>()).results) openEsc.set(r.rooftop_key, r.n);
+    for (const r of (await env.DB.prepare(`SELECT rooftop_key, COUNT(*) AS n, MIN(COALESCE(escalation_first_at, create_time)) AS oldest
+        FROM reviews WHERE ${sc.sql} AND escalation_open > 0 AND status != 'removed' GROUP BY rooftop_key`)
+      .bind(...sc.args).all<{ rooftop_key: string; n: number; oldest: string }>()).results) {
+      openEsc.set(r.rooftop_key, r.n);
+      if (r.oldest) oldestEsc.set(r.rooftop_key, r.oldest);
+    }
   }
-  const storeRows = (byRooftop.results as any[]).map((r) => ({ ...r, name: names[r.rooftop_key] || r.rooftop_key, open_escalations: openEsc.get(r.rooftop_key) || 0 }));
-  for (const [k, n] of openEsc) {
-    if (!storeRows.some((r) => r.rooftop_key === k)) storeRows.push({ rooftop_key: k, name: names[k] || k, total: 0, answered: 0, open: 0, avg_stars: null, avg_hours: null, open_escalations: n });
+  const earliest = (a?: string | null, b?: string | null) => (!a ? b || null : !b ? a : a < b ? a : b);
+
+  // Every site's reviews per store in this range (the Reviews column), and sold / RO counts for the range
+  const etDay = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const rangeDays = url.searchParams.get("start") || url.searchParams.get("end")
+    ? { start: url.searchParams.get("start") || "", end: url.searchParams.get("end") || etDay(new Date()) }
+    : days > 0 ? { start: etDay(new Date(Date.now() - days * 86400_000)), end: etDay(new Date()) } : null;
+  const allSites = new Map<string, Record<string, number>>();
+  {
+    const sc = scope(user, env, url.searchParams.get("rooftop"));
+    const w = [sc.sql, "status != 'removed'"]; const a: unknown[] = [...sc.args];
+    if (from) { w.push("create_time >= ?"); a.push(from); }
+    if (to) { w.push("create_time < ?"); a.push(to); }
+    const srcCol = (await hasSourceCol(env)) ? "COALESCE(source, 'Google')" : "'Google'";
+    for (const r of (await env.DB.prepare(`SELECT rooftop_key, ${srcCol} AS site, COUNT(*) AS n FROM reviews WHERE ${w.join(" AND ")} GROUP BY rooftop_key, site`)
+      .bind(...a).all<{ rooftop_key: string; site: string; n: number }>()).results) {
+      const m = allSites.get(r.rooftop_key) || {}; m[r.site] = r.n; allSites.set(r.rooftop_key, m);
+    }
+  }
+  const vols = rangeDays ? await storeVolumes(env, rangeDays.start, rangeDays.end) : new Map<string, { sold: number | null; ros: number | null; from: string }>();
+  const storeRows: any[] = (byRooftop.results as any[]).map((r) => ({ ...r, name: names[r.rooftop_key] || r.rooftop_key, open_escalations: openEsc.get(r.rooftop_key) || 0,
+    oldest_open: earliest(r.oldest_open, oldestEsc.get(r.rooftop_key)) }));
+  const ensure = (k: string) => {
+    let row = storeRows.find((r) => r.rooftop_key === k);
+    if (!row) { row = { rooftop_key: k, name: names[k] || k, total: 0, answered: 0, open: 0, avg_stars: null, avg_hours: null, open_escalations: 0, oldest_open: null }; storeRows.push(row); }
+    return row;
+  };
+  for (const [k, n] of openEsc) { const row = ensure(k); row.open_escalations = n; row.oldest_open = earliest(row.oldest_open, oldestEsc.get(k)); }
+  for (const k of allSites.keys()) ensure(k);
+  const one = url.searchParams.get("rooftop");
+  if (one && canSee(user, one)) ensure(one);
+  for (const k of vols.keys()) if ((!one || k === one) && canSee(user, k)) ensure(k);
+  for (const row of storeRows) {
+    const sites = allSites.get(row.rooftop_key) || {};
+    row.sites = sites;
+    row.all_total = Object.values(sites).reduce((a, n) => a + n, 0);
+    const v = vols.get(row.rooftop_key);
+    row.sold = v?.sold ?? null; row.ros = v?.ros ?? null; row.volumes_from = v?.from || null;
   }
   return json({
     days,
     overall: { ...(overall.results[0] as any), open_escalations: [...openEsc.values()].reduce((a, n) => a + n, 0) },
     rooftops: storeRows,
+    range: rangeDays,
     monthly: monthly.results,
     stars: starsDist.results,
     escalations: await escalationStats(env, user, url.searchParams.get("rooftop"), from, to, names),
@@ -622,6 +663,51 @@ async function staleEscalations(env: Env, user: User): Promise<Response> {
     WHERE ${s.sql} AND escalation_open > 0 AND status != 'removed' AND escalation_last_at <= ?
     ORDER BY escalation_last_at ASC LIMIT 50`).bind(...s.args, staleCutoff(env)).all()).results;
   return json({ days, reviews: rows });
+}
+
+/** Sold and RO counts for a date range: an entry for exactly that range, or, when the range is whole
+ *  calendar months, the sum of each month's entries (only if every month has one). */
+async function storeVolumes(env: Env, start: string, end: string): Promise<Map<string, { sold: number | null; ros: number | null; from: string }>> {
+  const out = new Map<string, { sold: number | null; ros: number | null; from: string }>();
+  try {
+    for (const r of (await env.DB.prepare("SELECT rooftop_key, sold, ros FROM store_volumes WHERE start_day = ? AND end_day = ?").bind(start, end).all<any>()).results) {
+      out.set(r.rooftop_key, { sold: r.sold, ros: r.ros, from: "range" });
+    }
+    const months: [string, string][] = [];
+    const s = new Date(start + "T12:00:00Z"), e = new Date(end + "T12:00:00Z");
+    const lastDay = (y: number, m: number) => new Date(Date.UTC(y, m + 1, 0)).toISOString().slice(0, 10);
+    if (s.getUTCDate() === 1 && end === lastDay(e.getUTCFullYear(), e.getUTCMonth()) && s <= e) {
+      for (let y = s.getUTCFullYear(), m = s.getUTCMonth(); y < e.getUTCFullYear() || (y === e.getUTCFullYear() && m <= e.getUTCMonth()); m === 11 ? (y++, m = 0) : m++) {
+        months.push([`${y}-${String(m + 1).padStart(2, "0")}-01`, lastDay(y, m)]);
+      }
+    }
+    if (months.length > 1) {
+      const rows = (await env.DB.prepare(`SELECT rooftop_key, start_day, sold, ros FROM store_volumes WHERE (${months.map(() => "(start_day = ? AND end_day = ?)").join(" OR ")})`)
+        .bind(...months.flat()).all<any>()).results;
+      const by = new Map<string, any[]>();
+      for (const r of rows) by.set(r.rooftop_key, [...(by.get(r.rooftop_key) || []), r]);
+      for (const [k, list] of by) {
+        if (out.has(k) || list.length !== months.length) continue;
+        const sum = (f: string) => list.every((x) => x[f] == null) ? null : list.reduce((a, x) => a + (x[f] || 0), 0);
+        out.set(k, { sold: sum("sold"), ros: sum("ros"), from: "months" });
+      }
+    }
+  } catch { /* migration 0015 not run yet */ }
+  return out;
+}
+
+async function saveVolumes(env: Env, user: User, body: any): Promise<Response> {
+  if (user.role !== "admin" && user.role !== "manager") return fail("Only admins and managers can enter sold and RO counts.", 403);
+  const k = String(body?.rooftop || ""), start = String(body?.start || ""), end = String(body?.end || "");
+  if (!ROOFTOPS.some((r) => r.key === k) || !canAct(user, k)) return fail("You can't enter counts for that store.", 403);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end) || start > end) return fail("Pick a date range first.");
+  const n = (v: unknown) => (v === "" || v === null || v === undefined ? null : Math.max(0, Math.min(1_000_000, Math.round(Number(v)) || 0)));
+  try {
+    await env.DB.prepare(`INSERT INTO store_volumes (rooftop_key, start_day, end_day, sold, ros, updated_by, updated_at) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(rooftop_key, start_day, end_day) DO UPDATE SET sold=excluded.sold, ros=excluded.ros, updated_by=excluded.updated_by, updated_at=excluded.updated_at`)
+      .bind(k, start, end, n(body?.sold), n(body?.ros), user.email, nowIso()).run();
+  } catch { return fail("One-time setup needed: run migrations/0015_store_volumes.sql in the D1 console.", 503); }
+  return json({ saved: true });
 }
 
 /** Everyone on the escalation team lists for one store, or for every store the person can see. */
@@ -881,6 +967,7 @@ export async function handleApi(req: Request, env: Env, user: User): Promise<Res
   if (path === "/api/reviews" && req.method === "GET") return listReviews(env, user, url);
   if (path === "/api/reviews" && req.method === "POST") return createManualReview(env, user, body);
   if (path === "/api/stats/recipients") return statsRecipients(env, user, url);
+  if (path === "/api/stats/volumes" && req.method === "POST") return saveVolumes(env, user, body);
   if (path === "/api/stats/email" && req.method === "POST") return statsEmailSend(env, user, req, body);
   if (path === "/api/stats") return stats(env, user, url);
   if (path.startsWith("/api/admin/")) return admin(env, user, req, path, url, body);
